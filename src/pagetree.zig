@@ -92,7 +92,7 @@ fn resolveCompressedObject(
         else => return Object{ .null = {} },
     };
 
-    // Decompress stream
+    // Decompress stream (arena-allocated, no need to free)
     const decompress = @import("decompress.zig");
     const decoded = decompress.decompressStream(
         allocator,
@@ -100,7 +100,6 @@ fn resolveCompressedObject(
         stream.dict.get("Filter"),
         stream.dict.get("DecodeParms"),
     ) catch return Object{ .null = {} };
-    defer allocator.free(decoded);
 
     // Parse object stream header
     const n = stream.dict.getInt("N") orelse return Object{ .null = {} };
@@ -335,8 +334,7 @@ fn getStreamData(
 
             for (arr) |item| {
                 const stream_data = try getStreamData(allocator, data, xref, item, cache);
-                defer if (stream_data.ptr != data.ptr) allocator.free(stream_data);
-
+                // stream_data is arena-allocated, no need to free
                 try result.appendSlice(allocator, stream_data);
                 try result.append(allocator, '\n'); // Separate streams
             }

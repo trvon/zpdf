@@ -32,6 +32,7 @@ pub const XRefEntry = struct {
 pub const XRefTable = struct {
     entries: std.AutoHashMap(u32, XRefEntry),
     trailer: Object.Dict,
+    /// Allocator for HashMap internals
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) XRefTable {
@@ -44,6 +45,7 @@ pub const XRefTable = struct {
 
     pub fn deinit(self: *XRefTable) void {
         self.entries.deinit();
+        // Note: trailer is allocated from parsing arena, freed separately
     }
 
     pub fn get(self: XRefTable, obj_num: u32) ?XRefEntry {
@@ -62,11 +64,13 @@ pub const XRefParseError = error{
 };
 
 /// Parse XRef from PDF data, starting from EOF
-pub fn parseXRef(allocator: std.mem.Allocator, data: []const u8) XRefParseError!XRefTable {
+/// hash_allocator: used for XRefTable.entries HashMap
+/// parse_allocator: used for parsing objects (can be arena)
+pub fn parseXRef(hash_allocator: std.mem.Allocator, parse_allocator: std.mem.Allocator, data: []const u8) XRefParseError!XRefTable {
     // Find startxref from end of file
     const startxref_offset = findStartXref(data) orelse return XRefParseError.StartXrefNotFound;
 
-    var xref = XRefTable.init(allocator);
+    var xref = XRefTable.init(hash_allocator);
     errdefer xref.deinit();
 
     // Parse XRef chain (following /Prev links for incremental updates)
@@ -79,14 +83,14 @@ pub fn parseXRef(allocator: std.mem.Allocator, data: []const u8) XRefParseError!
 
         if (std.mem.startsWith(u8, xref_start, "xref")) {
             // Traditional xref table
-            const trailer = try parseXrefTable(allocator, data, offset, &xref);
+            const trailer = try parseXrefTable(parse_allocator, data, offset, &xref);
             if (xref.trailer.entries.len == 0) {
                 xref.trailer = trailer;
             }
             current_offset = getTrailerPrev(trailer);
         } else {
             // XRef stream (starts with object definition like "10 0 obj")
-            const trailer = try parseXrefStream(allocator, data, offset, &xref);
+            const trailer = try parseXrefStream(parse_allocator, data, offset, &xref);
             if (xref.trailer.entries.len == 0) {
                 xref.trailer = trailer;
             }
@@ -260,14 +264,13 @@ fn parseXrefStream(
     const entry_size = w0 + w1 + w2;
     if (entry_size == 0) return XRefParseError.InvalidXrefStream;
 
-    // Decompress stream data
+    // Decompress stream data (arena-allocated, no need to free)
     const decoded = decompress.decompressStream(
         allocator,
         stream.data,
         dict.get("Filter"),
         dict.get("DecodeParms"),
     ) catch return XRefParseError.InvalidXrefStream;
-    defer allocator.free(decoded);
 
     // Get /Index array (object number ranges), default is [0 Size]
     const size = dict.getInt("Size") orelse return XRefParseError.InvalidXrefStream;
@@ -422,7 +425,7 @@ test "parse simple xref table" {
         \\%%EOF
     ;
 
-    var xref = try parseXRef(std.testing.allocator, pdf_data);
+    var xref = try parseXRef(std.testing.allocator, std.testing.allocator, pdf_data);
     defer xref.deinit();
 
     // Should have 2 entries

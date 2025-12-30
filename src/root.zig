@@ -95,8 +95,11 @@ pub const Document = struct {
     /// Object resolution cache
     object_cache: std.AutoHashMap(u32, Object),
 
-    /// Allocator
+    /// Allocator for long-lived allocations
     allocator: std.mem.Allocator,
+
+    /// Arena for parsed objects (freed on close)
+    parsing_arena: std.heap.ArenaAllocator,
 
     /// Error configuration
     error_config: ErrorConfig,
@@ -142,6 +145,7 @@ pub const Document = struct {
             .pages = .empty,
             .object_cache = std.AutoHashMap(u32, Object).init(allocator),
             .allocator = allocator,
+            .parsing_arena = std.heap.ArenaAllocator.init(allocator),
             .error_config = config,
             .errors = .empty,
         };
@@ -162,6 +166,7 @@ pub const Document = struct {
             .pages = .empty,
             .object_cache = std.AutoHashMap(u32, Object).init(allocator),
             .allocator = allocator,
+            .parsing_arena = std.heap.ArenaAllocator.init(allocator),
             .error_config = config,
             .errors = .empty,
         };
@@ -171,6 +176,8 @@ pub const Document = struct {
     }
 
     fn parseDocument(self: *Document) !void {
+        const arena = self.parsing_arena.allocator();
+
         // Verify header
         if (!std.mem.startsWith(u8, self.data, "%PDF-")) {
             if (!self.error_config.continue_on_parse_error) {
@@ -183,8 +190,8 @@ pub const Document = struct {
             });
         }
 
-        // Parse XRef
-        self.xref_table = xref.parseXRef(self.allocator, self.data) catch |err| {
+        // Parse XRef (HashMap uses base allocator, parsed objects use arena)
+        self.xref_table = xref.parseXRef(self.allocator, arena, self.data) catch |err| {
             if (self.error_config.continue_on_parse_error) {
                 try self.errors.append(self.allocator, .{
                     .kind = .invalid_xref,
@@ -197,8 +204,8 @@ pub const Document = struct {
             }
         };
 
-        // Build page tree
-        const pages_slice = pagetree.buildPageTree(self.allocator, self.data, &self.xref_table) catch |err| {
+        // Build page tree (uses arena for all allocations)
+        const pages_slice = pagetree.buildPageTree(arena, self.data, &self.xref_table) catch |err| {
             if (self.error_config.continue_on_parse_error) {
                 try self.errors.append(self.allocator, .{
                     .kind = .syntax_error,
@@ -211,11 +218,10 @@ pub const Document = struct {
             }
         };
 
-        // Move pages to ArrayList
+        // Move pages to ArrayList (arena allocated slice, no need to free)
         for (pages_slice) |page| {
             try self.pages.append(self.allocator, page);
         }
-        self.allocator.free(pages_slice);
     }
 
     /// Close the document and free resources
@@ -224,6 +230,9 @@ pub const Document = struct {
             const aligned_ptr: [*]align(std.heap.page_size_min) u8 = @alignCast(@ptrCast(@constCast(self.data.ptr)));
             std.posix.munmap(aligned_ptr[0..self.data.len]);
         }
+
+        // Free the arena which contains all parsed objects
+        self.parsing_arena.deinit();
 
         self.xref_table.deinit();
         self.object_cache.deinit();
@@ -241,7 +250,7 @@ pub const Document = struct {
     /// Resolve an object reference
     pub fn resolve(self: *Document, ref: ObjRef) !Object {
         return pagetree.resolveRef(
-            self.allocator,
+            self.parsing_arena.allocator(),
             self.data,
             &self.xref_table,
             ref,
@@ -254,10 +263,11 @@ pub const Document = struct {
         if (page_num >= self.pages.items.len) return error.PageNotFound;
 
         const page = self.pages.items[page_num];
+        const arena = self.parsing_arena.allocator();
 
-        // Get content stream
+        // Get content stream (allocated from arena, no need to free)
         const content = pagetree.getPageContents(
-            self.allocator,
+            arena,
             self.data,
             &self.xref_table,
             page,
@@ -274,9 +284,6 @@ pub const Document = struct {
                 return err;
             }
         };
-
-        const should_free = content.ptr != self.data.ptr and content.len > 0;
-        defer if (should_free) self.allocator.free(@constCast(content));
 
         if (content.len == 0) return;
 
