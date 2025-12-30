@@ -6,7 +6,31 @@ from ._ffi import ffi, lib
 from .exceptions import ZpdfError, InvalidPdfError, PageNotFoundError, ExtractionError
 
 __version__ = "0.1.0"
-__all__ = ["Document", "PageInfo", "ZpdfError", "InvalidPdfError", "PageNotFoundError", "ExtractionError"]
+__all__ = ["Document", "PageInfo", "TextSpan", "ZpdfError", "InvalidPdfError", "PageNotFoundError", "ExtractionError"]
+
+
+class TextSpan:
+    """A text span with bounding box coordinates."""
+    __slots__ = ("x0", "y0", "x1", "y1", "text", "font_size")
+
+    def __init__(self, x0: float, y0: float, x1: float, y1: float, text: str, font_size: float):
+        self.x0 = x0
+        self.y0 = y0
+        self.x1 = x1
+        self.y1 = y1
+        self.text = text
+        self.font_size = font_size
+
+    def __repr__(self):
+        return f"TextSpan(x0={self.x0:.1f}, y0={self.y0:.1f}, x1={self.x1:.1f}, y1={self.y1:.1f}, text={self.text!r}, font_size={self.font_size:.1f})"
+
+    @property
+    def width(self) -> float:
+        return self.x1 - self.x0
+
+    @property
+    def height(self) -> float:
+        return self.y1 - self.y0
 
 
 class PageInfo:
@@ -110,6 +134,37 @@ class Document:
             return data.decode("utf-8", errors="replace")
         finally:
             lib.zpdf_free_buffer(buf_ptr, out_len[0])
+
+    def extract_bounds(self, page_num: int) -> list[TextSpan]:
+        """Extract text spans with bounding boxes from a page."""
+        self._check_open()
+        if page_num < 0 or page_num >= self.page_count:
+            raise PageNotFoundError(f"Page {page_num} not found")
+
+        out_count = ffi.new("size_t*")
+        spans_ptr = lib.zpdf_extract_bounds(self._handle, page_num, out_count)
+
+        if spans_ptr == ffi.NULL and out_count[0] == 0:
+            return []
+        if spans_ptr == ffi.NULL:
+            raise ExtractionError(f"Failed to extract bounds for page {page_num}")
+
+        try:
+            spans = []
+            for i in range(out_count[0]):
+                span = spans_ptr[i]
+                text = ffi.buffer(span.text, span.text_len)[:].decode("utf-8", errors="replace")
+                spans.append(TextSpan(
+                    x0=span.x0,
+                    y0=span.y0,
+                    x1=span.x1,
+                    y1=span.y1,
+                    text=text,
+                    font_size=span.font_size,
+                ))
+            return spans
+        finally:
+            lib.zpdf_free_bounds(spans_ptr, out_count[0])
 
     def __iter__(self) -> Iterator[str]:
         for i in range(self.page_count):

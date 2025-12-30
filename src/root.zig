@@ -19,6 +19,7 @@ pub const encoding = @import("encoding.zig");
 pub const interpreter = @import("interpreter.zig");
 pub const decompress = @import("decompress.zig");
 pub const simd = @import("simd.zig");
+pub const layout = @import("layout.zig");
 
 // Re-exports
 pub const Object = parser.Object;
@@ -26,6 +27,8 @@ pub const ObjRef = parser.ObjRef;
 pub const XRefTable = xref.XRefTable;
 pub const Page = pagetree.Page;
 pub const FontEncoding = encoding.FontEncoding;
+pub const TextSpan = layout.TextSpan;
+pub const LayoutResult = layout.LayoutResult;
 
 /// Error handling configuration
 pub const ErrorConfig = struct {
@@ -299,6 +302,40 @@ pub const Document = struct {
         }
     }
 
+    /// Extract text with bounding boxes from a page
+    pub fn extractTextWithBounds(self: *Document, page_num: usize, allocator: std.mem.Allocator) ![]TextSpan {
+        if (page_num >= self.pages.items.len) return error.PageNotFound;
+
+        const page = self.pages.items[page_num];
+        const arena = self.parsing_arena.allocator();
+
+        const content = pagetree.getPageContents(
+            arena,
+            self.data,
+            &self.xref_table,
+            page,
+            &self.object_cache,
+        ) catch return &.{};
+
+        if (content.len == 0) return &.{};
+
+        var collector = interpreter.SpanCollector.init(allocator);
+        errdefer collector.deinit();
+
+        try extractTextFromContentWithBounds(content, page.resources, &collector);
+        try collector.flush();
+
+        return collector.spans.toOwnedSlice(collector.allocator);
+    }
+
+    /// Analyze page layout (columns, paragraphs, reading order)
+    pub fn analyzePageLayout(self: *Document, page_num: usize, allocator: std.mem.Allocator) !LayoutResult {
+        const spans = try self.extractTextWithBounds(page_num, allocator);
+        const page = self.pages.items[page_num];
+        const page_width = page.media_box[2] - page.media_box[0];
+        return layout.analyzeLayout(allocator, spans, page_width);
+    }
+
     /// Extract text from all pages in parallel (returns concatenated result)
     pub fn extractAllTextParallel(self: *Document, allocator: std.mem.Allocator) ![]u8 {
         const num_pages = self.pages.items.len;
@@ -555,6 +592,114 @@ fn writeTJArray(operand: interpreter.Operand, writer: anytype) !void {
             .number => |n| {
                 if (n < -100) {
                     try writer.writeByte(' ');
+                }
+            },
+            else => {},
+        }
+    }
+}
+
+fn extractTextFromContentWithBounds(content: []const u8, resources: ?Object.Dict, collector: *interpreter.SpanCollector) !void {
+    _ = resources;
+
+    var lexer = interpreter.ContentLexer.init(content);
+    var operands: [64]interpreter.Operand = undefined;
+    var operand_count: usize = 0;
+
+    var current_x: f64 = 0;
+    var current_y: f64 = 0;
+    var font_size: f64 = 12;
+
+    while (try lexer.next()) |token| {
+        switch (token) {
+            .number => |n| {
+                if (operand_count < 64) {
+                    operands[operand_count] = .{ .number = n };
+                    operand_count += 1;
+                }
+            },
+            .string => |s| {
+                if (operand_count < 64) {
+                    operands[operand_count] = .{ .string = s };
+                    operand_count += 1;
+                }
+            },
+            .hex_string => |s| {
+                if (operand_count < 64) {
+                    operands[operand_count] = .{ .hex_string = s };
+                    operand_count += 1;
+                }
+            },
+            .name => |n| {
+                if (operand_count < 64) {
+                    operands[operand_count] = .{ .name = n };
+                    operand_count += 1;
+                }
+            },
+            .array => |arr| {
+                if (operand_count < 64) {
+                    operands[operand_count] = .{ .array = arr };
+                    operand_count += 1;
+                }
+            },
+            .operator => |op| {
+                if (op.len > 0) switch (op[0]) {
+                    'T' => if (op.len == 2) switch (op[1]) {
+                        'f' => if (operand_count >= 2) {
+                            font_size = operands[1].number;
+                            collector.setFontSize(font_size);
+                        },
+                        'd', 'D' => if (operand_count >= 2) {
+                            current_x += operands[0].number;
+                            current_y += operands[1].number;
+                            try collector.flush();
+                            collector.setPosition(current_x, current_y);
+                        },
+                        'm' => if (operand_count >= 6) {
+                            current_x = operands[4].number;
+                            current_y = operands[5].number;
+                            try collector.flush();
+                            collector.setPosition(current_x, current_y);
+                        },
+                        '*' => {
+                            try collector.flush();
+                        },
+                        'j' => if (operand_count >= 1) {
+                            try writeTextOperand(operands[0], collector);
+                        },
+                        'J' => if (operand_count >= 1) {
+                            try writeTJArrayWithBounds(operands[0], collector);
+                        },
+                        else => {},
+                    },
+                    '\'' => if (operand_count >= 1) {
+                        try collector.flush();
+                        try writeTextOperand(operands[0], collector);
+                    },
+                    '"' => if (operand_count >= 3) {
+                        try collector.flush();
+                        try writeTextOperand(operands[2], collector);
+                    },
+                    else => {},
+                };
+                operand_count = 0;
+            },
+        }
+    }
+}
+
+fn writeTJArrayWithBounds(operand: interpreter.Operand, collector: *interpreter.SpanCollector) !void {
+    const arr = switch (operand) {
+        .array => |a| a,
+        else => return,
+    };
+
+    for (arr) |item| {
+        switch (item) {
+            .string, .hex_string => try writeTextOperand(item, collector),
+            .number => |n| {
+                if (n < -100) {
+                    try collector.flush();
                 }
             },
             else => {},

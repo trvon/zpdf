@@ -16,6 +16,147 @@ const decompress = @import("decompress.zig");
 
 const Object = parser.Object;
 
+/// Font metrics from FontDescriptor
+pub const FontMetrics = struct {
+    /// Ascender height (in glyph space units, typically 1000 units = 1 em)
+    ascender: f64 = 800,
+    /// Descender depth (negative value)
+    descender: f64 = -200,
+    /// Cap height
+    cap_height: f64 = 700,
+    /// X-height (height of lowercase 'x')
+    x_height: f64 = 500,
+    /// Font bounding box [llx, lly, urx, ury]
+    bbox: [4]f64 = .{ 0, -200, 1000, 800 },
+    /// Default glyph width
+    default_width: f64 = 600,
+    /// Italic angle (negative = right-leaning)
+    italic_angle: f64 = 0,
+    /// Missing width (for undefined glyphs)
+    missing_width: f64 = 0,
+};
+
+/// CID System Info - identifies the character collection
+pub const CIDSystemInfo = struct {
+    registry: []const u8 = "Adobe",
+    ordering: []const u8 = "Identity",
+    supplement: i32 = 0,
+
+    pub fn isAdobeJapan(self: *const CIDSystemInfo) bool {
+        return std.mem.eql(u8, self.registry, "Adobe") and
+            std.mem.eql(u8, self.ordering, "Japan1");
+    }
+
+    pub fn isAdobeGB(self: *const CIDSystemInfo) bool {
+        return std.mem.eql(u8, self.registry, "Adobe") and
+            std.mem.eql(u8, self.ordering, "GB1");
+    }
+
+    pub fn isAdobeCNS(self: *const CIDSystemInfo) bool {
+        return std.mem.eql(u8, self.registry, "Adobe") and
+            std.mem.eql(u8, self.ordering, "CNS1");
+    }
+
+    pub fn isAdobeKorea(self: *const CIDSystemInfo) bool {
+        return std.mem.eql(u8, self.registry, "Adobe") and
+            std.mem.eql(u8, self.ordering, "Korea1");
+    }
+
+    pub fn isIdentity(self: *const CIDSystemInfo) bool {
+        return std.mem.eql(u8, self.ordering, "Identity");
+    }
+};
+
+/// CID to GID mapping for TrueType-based CID fonts
+pub const CIDToGIDMap = struct {
+    /// Mapping type
+    mapping: MappingType,
+
+    pub const MappingType = union(enum) {
+        /// Identity mapping: CID = GID
+        identity: void,
+        /// Explicit mapping from stream
+        stream_map: []const u16,
+    };
+
+    pub fn init() CIDToGIDMap {
+        return .{ .mapping = .identity };
+    }
+
+    pub fn getGID(self: *const CIDToGIDMap, cid: u32) u32 {
+        return switch (self.mapping) {
+            .identity => cid,
+            .stream_map => |map| blk: {
+                if (cid < map.len) {
+                    break :blk map[cid];
+                }
+                break :blk cid;
+            },
+        };
+    }
+};
+
+/// Glyph widths for accurate positioning
+pub const GlyphWidths = struct {
+    /// Simple font: widths indexed by character code (0-255)
+    simple_widths: [256]f64,
+    /// CID font: widths mapped from CID ranges
+    cid_widths: []const CIDWidthEntry,
+    /// Default width for CID fonts
+    default_width: f64,
+    /// First character code (for simple fonts)
+    first_char: u16,
+    /// Last character code (for simple fonts)
+    last_char: u16,
+    allocator: std.mem.Allocator,
+
+    pub const CIDWidthEntry = struct {
+        cid_start: u32,
+        cid_end: u32,
+        width: f64,
+    };
+
+    pub fn init(allocator: std.mem.Allocator) GlyphWidths {
+        var widths = GlyphWidths{
+            .simple_widths = undefined,
+            .cid_widths = &.{},
+            .default_width = 1000,
+            .first_char = 0,
+            .last_char = 255,
+            .allocator = allocator,
+        };
+        // Default to monospace-like widths
+        for (&widths.simple_widths) |*w| {
+            w.* = 600;
+        }
+        return widths;
+    }
+
+    pub fn deinit(self: *GlyphWidths) void {
+        if (self.cid_widths.len > 0) {
+            self.allocator.free(self.cid_widths);
+        }
+    }
+
+    /// Get width for a character code (simple font)
+    pub fn getWidth(self: *const GlyphWidths, char_code: u8) f64 {
+        if (char_code < self.first_char or char_code > self.last_char) {
+            return self.default_width;
+        }
+        return self.simple_widths[char_code];
+    }
+
+    /// Get width for a CID
+    pub fn getCIDWidth(self: *const GlyphWidths, cid: u32) f64 {
+        for (self.cid_widths) |entry| {
+            if (cid >= entry.cid_start and cid <= entry.cid_end) {
+                return entry.width;
+            }
+        }
+        return self.default_width;
+    }
+};
+
 /// Font encoding for character code to Unicode mapping
 pub const FontEncoding = struct {
     /// Unicode codepoints indexed by character code (0-255 for simple fonts)
@@ -26,6 +167,14 @@ pub const FontEncoding = struct {
     is_cid: bool,
     /// Bytes per character (1 for simple, 1-4 for CID)
     bytes_per_char: u8,
+    /// Font metrics from FontDescriptor
+    metrics: FontMetrics,
+    /// Glyph widths
+    widths: GlyphWidths,
+    /// CID system info (for CID fonts)
+    cid_system_info: CIDSystemInfo,
+    /// CID to GID mapping (for CIDFontType2)
+    cid_to_gid_map: CIDToGIDMap,
 
     allocator: std.mem.Allocator,
 
@@ -42,6 +191,10 @@ pub const FontEncoding = struct {
             .cmap_ranges = &.{},
             .is_cid = false,
             .bytes_per_char = 1,
+            .metrics = .{},
+            .widths = GlyphWidths.init(allocator),
+            .cid_system_info = .{},
+            .cid_to_gid_map = CIDToGIDMap.init(),
             .allocator = allocator,
         };
 
@@ -54,6 +207,12 @@ pub const FontEncoding = struct {
     pub fn deinit(self: *FontEncoding) void {
         if (self.cmap_ranges.len > 0) {
             self.allocator.free(self.cmap_ranges);
+        }
+        self.widths.deinit();
+        // Free CIDToGIDMap stream data if present
+        switch (self.cid_to_gid_map.mapping) {
+            .stream_map => |map| self.allocator.free(map),
+            .identity => {},
         }
     }
 
@@ -216,12 +375,15 @@ pub fn parseFontEncoding(
                 if (cid_font_obj == .dict) {
                     const cid_font = cid_font_obj.dict;
 
+                    // Parse CIDSystemInfo
+                    parseCIDSystemInfo(cid_font, resolve_fn, &encoding);
+
                     // Check CIDFont subtype for additional info
                     const cid_subtype = cid_font.getName("Subtype");
                     if (cid_subtype) |cst| {
                         if (std.mem.eql(u8, cst, "CIDFontType2")) {
-                            // TrueType-based CID font - may need CIDToGIDMap
-                            // Identity mapping is common and means CID = GID
+                            // TrueType-based CID font - parse CIDToGIDMap
+                            try parseCIDToGIDMap(allocator, cid_font, resolve_fn, &encoding);
                         }
                     }
 
@@ -282,7 +444,227 @@ pub fn parseFontEncoding(
         }
     }
 
+    // Parse FontDescriptor for metrics
+    try parseFontDescriptor(font_dict, resolve_fn, &encoding);
+
+    // Parse glyph widths
+    try parseWidths(allocator, font_dict, resolve_fn, &encoding);
+
+    // For Type0 fonts, also check DescendantFonts for widths
+    if (is_type0) {
+        if (font_dict.getArray("DescendantFonts")) |descendants| {
+            if (descendants.len > 0) {
+                const cid_font_obj = resolve_fn(descendants[0]) catch descendants[0];
+                if (cid_font_obj == .dict) {
+                    try parseCIDWidths(allocator, cid_font_obj.dict, resolve_fn, &encoding);
+                    try parseFontDescriptor(cid_font_obj.dict, resolve_fn, &encoding);
+                }
+            }
+        }
+    }
+
     return encoding;
+}
+
+/// Parse FontDescriptor for font metrics
+fn parseFontDescriptor(font_dict: Object.Dict, resolve_fn: anytype, encoding: *FontEncoding) !void {
+    const fd_obj = font_dict.get("FontDescriptor") orelse return;
+    const resolved = resolve_fn(fd_obj) catch return;
+    if (resolved != .dict) return;
+
+    const fd = resolved.dict;
+
+    // Parse metrics
+    if (fd.getNumber("Ascent")) |v| encoding.metrics.ascender = v;
+    if (fd.getNumber("Descent")) |v| encoding.metrics.descender = v;
+    if (fd.getNumber("CapHeight")) |v| encoding.metrics.cap_height = v;
+    if (fd.getNumber("XHeight")) |v| encoding.metrics.x_height = v;
+    if (fd.getNumber("ItalicAngle")) |v| encoding.metrics.italic_angle = v;
+    if (fd.getNumber("MissingWidth")) |v| encoding.metrics.missing_width = v;
+
+    // Parse FontBBox
+    if (fd.getArray("FontBBox")) |bbox_arr| {
+        if (bbox_arr.len >= 4) {
+            for (0..4) |i| {
+                if (getNumber(bbox_arr[i])) |v| {
+                    encoding.metrics.bbox[i] = v;
+                }
+            }
+        }
+    }
+}
+
+/// Parse /Widths array for simple fonts
+fn parseWidths(allocator: std.mem.Allocator, font_dict: Object.Dict, resolve_fn: anytype, encoding: *FontEncoding) !void {
+    _ = allocator;
+    _ = resolve_fn;
+
+    // Get FirstChar and LastChar
+    const first_char: u16 = if (font_dict.getNumber("FirstChar")) |v|
+        @intFromFloat(@max(0, @min(255, v)))
+    else
+        0;
+    const last_char: u16 = if (font_dict.getNumber("LastChar")) |v|
+        @intFromFloat(@max(0, @min(255, v)))
+    else
+        255;
+
+    encoding.widths.first_char = first_char;
+    encoding.widths.last_char = last_char;
+
+    // Parse Widths array
+    if (font_dict.getArray("Widths")) |widths_arr| {
+        for (widths_arr, 0..) |w, i| {
+            const char_code = first_char + @as(u16, @intCast(i));
+            if (char_code > 255) break;
+
+            if (getNumber(w)) |width| {
+                encoding.widths.simple_widths[char_code] = width;
+            }
+        }
+    }
+}
+
+/// Parse /W and /DW for CID fonts
+fn parseCIDWidths(allocator: std.mem.Allocator, cid_font: Object.Dict, resolve_fn: anytype, encoding: *FontEncoding) !void {
+    _ = resolve_fn;
+
+    // Default width
+    if (cid_font.getNumber("DW")) |dw| {
+        encoding.widths.default_width = dw;
+    }
+
+    // Width array /W
+    const w_arr = cid_font.getArray("W") orelse return;
+
+    var cid_widths = std.ArrayList(GlyphWidths.CIDWidthEntry).init(allocator);
+    errdefer cid_widths.deinit();
+
+    var i: usize = 0;
+    while (i < w_arr.len) {
+        // Each entry is either:
+        // c [w1 w2 w3 ...] - individual widths starting at CID c
+        // c_first c_last w - range of CIDs with same width
+        const first_obj = w_arr[i];
+        const first_cid = getNumberU32(first_obj) orelse {
+            i += 1;
+            continue;
+        };
+
+        if (i + 1 >= w_arr.len) break;
+
+        const second = w_arr[i + 1];
+        switch (second) {
+            .array => |arr| {
+                // Individual widths
+                for (arr, 0..) |w, j| {
+                    if (getNumber(w)) |width| {
+                        try cid_widths.append(allocator, .{
+                            .cid_start = first_cid + @as(u32, @intCast(j)),
+                            .cid_end = first_cid + @as(u32, @intCast(j)),
+                            .width = width,
+                        });
+                    }
+                }
+                i += 2;
+            },
+            .integer, .real => {
+                // Range: c_first c_last w
+                if (i + 2 >= w_arr.len) break;
+                const last_cid = getNumberU32(second) orelse {
+                    i += 1;
+                    continue;
+                };
+                const width = getNumber(w_arr[i + 2]) orelse {
+                    i += 3;
+                    continue;
+                };
+                try cid_widths.append(allocator, .{
+                    .cid_start = first_cid,
+                    .cid_end = last_cid,
+                    .width = width,
+                });
+                i += 3;
+            },
+            else => {
+                i += 1;
+            },
+        }
+    }
+
+    if (cid_widths.items.len > 0) {
+        encoding.widths.cid_widths = try cid_widths.toOwnedSlice(allocator);
+    }
+}
+
+/// Parse CIDSystemInfo from CIDFont dictionary
+fn parseCIDSystemInfo(cid_font: Object.Dict, resolve_fn: anytype, encoding: *FontEncoding) void {
+    const csi_obj = cid_font.get("CIDSystemInfo") orelse return;
+    const resolved = resolve_fn(csi_obj) catch return;
+    if (resolved != .dict) return;
+
+    const csi = resolved.dict;
+
+    if (csi.getString("Registry")) |registry| {
+        encoding.cid_system_info.registry = registry;
+    }
+    if (csi.getString("Ordering")) |ordering| {
+        encoding.cid_system_info.ordering = ordering;
+    }
+    if (csi.getNumber("Supplement")) |supplement| {
+        encoding.cid_system_info.supplement = @intFromFloat(supplement);
+    }
+}
+
+/// Parse CIDToGIDMap from CIDFont dictionary
+fn parseCIDToGIDMap(allocator: std.mem.Allocator, cid_font: Object.Dict, resolve_fn: anytype, encoding: *FontEncoding) !void {
+    const map_obj = cid_font.get("CIDToGIDMap") orelse return;
+    const resolved = resolve_fn(map_obj) catch return;
+
+    switch (resolved) {
+        .name => |name| {
+            if (std.mem.eql(u8, name, "Identity")) {
+                encoding.cid_to_gid_map.mapping = .identity;
+            }
+        },
+        .stream => |stream| {
+            // Parse the stream - each entry is a 2-byte big-endian GID
+            const data = decompress.decompressStream(
+                allocator,
+                stream.data,
+                stream.dict.get("Filter"),
+                stream.dict.get("DecodeParms"),
+            ) catch return;
+
+            // Convert to u16 array
+            const num_entries = data.len / 2;
+            const gid_map = try allocator.alloc(u16, num_entries);
+
+            for (0..num_entries) |i| {
+                gid_map[i] = (@as(u16, data[i * 2]) << 8) | data[i * 2 + 1];
+            }
+
+            allocator.free(data);
+            encoding.cid_to_gid_map.mapping = .{ .stream_map = gid_map };
+        },
+        else => {},
+    }
+}
+
+fn getNumber(obj: Object) ?f64 {
+    return switch (obj) {
+        .integer => |i| @floatFromInt(i),
+        .real => |r| r,
+        else => null,
+    };
+}
+
+fn getNumberU32(obj: Object) ?u32 {
+    return switch (obj) {
+        .integer => |i| if (i >= 0) @intCast(i) else null,
+        .real => |r| if (r >= 0) @intFromFloat(r) else null,
+        else => null,
+    };
 }
 
 /// Apply predefined CMap encoding for CID fonts

@@ -90,3 +90,49 @@ export fn zpdf_get_page_info(handle: ?*ZpdfDocument, page_num: c_int, width: *f6
     }
     return -1;
 }
+
+pub const CTextSpan = extern struct {
+    x0: f64,
+    y0: f64,
+    x1: f64,
+    y1: f64,
+    text: [*]const u8,
+    text_len: usize,
+    font_size: f64,
+};
+
+export fn zpdf_extract_bounds(handle: ?*ZpdfDocument, page_num: c_int, out_count: *usize) ?[*]CTextSpan {
+    if (handle) |h| {
+        const doc: *zpdf.Document = @ptrCast(@alignCast(h));
+        if (page_num < 0) return null;
+
+        const spans = doc.extractTextWithBounds(@intCast(page_num), c_allocator) catch return null;
+        if (spans.len == 0) {
+            out_count.* = 0;
+            return null;
+        }
+
+        const c_spans = c_allocator.alloc(CTextSpan, spans.len) catch return null;
+        for (spans, 0..) |span, i| {
+            c_spans[i] = .{
+                .x0 = span.x0,
+                .y0 = span.y0,
+                .x1 = span.x1,
+                .y1 = span.y1,
+                .text = span.text.ptr,
+                .text_len = span.text.len,
+                .font_size = span.font_size,
+            };
+        }
+
+        out_count.* = spans.len;
+        return c_spans.ptr;
+    }
+    return null;
+}
+
+export fn zpdf_free_bounds(ptr: ?[*]CTextSpan, count: usize) void {
+    if (ptr) |p| {
+        c_allocator.free(p[0..count]);
+    }
+}

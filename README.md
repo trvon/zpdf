@@ -48,6 +48,23 @@ Auto-detects: NEON (ARM64), AVX2/SSE4.2 (x86_64), or scalar fallback.
 
 *Note: MuPDF's threading (`-T` flag) is for rendering/rasterization only. Text extraction via `mutool convert -F text` is single-threaded by design. zpdf parallelizes text extraction across pages.*
 
+### Accuracy
+
+Text extraction accuracy vs MuPDF (reference):
+
+| Document | Pages | Char Accuracy | WER | Speedup |
+|----------|-------|---------------|-----|---------|
+| [arXiv paper](https://arxiv.org/pdf/2512.22435) | 7 | 96.8% | 6.0% | 24x |
+| US Constitution | 85 | 99.6% | 2.1% | 15x |
+| C++ Standard Draft | 2,134 | 99.3% | 4.6% | 7.8x |
+| **Average** | | **98.6%** | **4.2%** | **15.6x** |
+
+- **Char Accuracy**: Sequence similarity (higher = better)
+- **WER**: Word Error Rate (lower = better)
+- Reference: MuPDF 1.26 (`mutool convert -F text`)
+
+Run `PYTHONPATH=python python benchmark/accuracy.py` to reproduce.
+
 ## Requirements
 
 - Zig 0.15.2 or later
@@ -143,14 +160,14 @@ examples/            # Usage examples
 | Feature | zpdf | MuPDF |
 |---------|------|-------|
 | **Text Extraction** | | |
-| Reading order / layout analysis | No | Yes |
-| Two-column detection | No | Yes |
-| Paragraph grouping | No | Yes |
-| Word/line bounding boxes | No | Yes |
+| Reading order / layout analysis | Yes | Yes |
+| Two-column detection | Yes | Yes |
+| Paragraph grouping | Yes | Yes |
+| Word/line bounding boxes | Yes | Yes |
 | **Font Support** | | |
 | WinAnsi/MacRoman | Yes | Yes |
 | ToUnicode CMap | Yes | Yes |
-| CID fonts (Type0) | Partial | Full |
+| CID fonts (Type0) | Yes | Yes |
 | Embedded fonts | No | Yes |
 | **Compression** | | |
 | FlateDecode, LZW, ASCII85/Hex | Yes | Yes |

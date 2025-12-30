@@ -9,3 +9,16 @@ uint8_t* zpdf_extract_all(ZpdfDocument* doc, size_t* out_len);
 uint8_t* zpdf_extract_all_parallel(ZpdfDocument* doc, size_t* out_len);
 void zpdf_free_buffer(uint8_t* ptr, size_t len);
 int zpdf_get_page_info(ZpdfDocument* doc, int page_num, double* width, double* height, int* rotation);
+
+typedef struct {
+    double x0;
+    double y0;
+    double x1;
+    double y1;
+    const char* text;
+    size_t text_len;
+    double font_size;
+} CTextSpan;
+
+CTextSpan* zpdf_extract_bounds(ZpdfDocument* doc, int page_num, size_t* out_count);
+void zpdf_free_bounds(CTextSpan* ptr, size_t count);

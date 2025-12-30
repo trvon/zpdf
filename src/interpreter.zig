@@ -15,6 +15,9 @@ const std = @import("std");
 const parser = @import("parser.zig");
 const encoding_mod = @import("encoding.zig");
 const decompress = @import("decompress.zig");
+pub const layout = @import("layout.zig");
+
+pub const TextSpan = layout.TextSpan;
 
 const Object = parser.Object;
 const ObjRef = parser.ObjRef;
@@ -388,6 +391,76 @@ pub fn ContentInterpreter(comptime Writer: type) type {
         }
     };
 }
+
+pub const SpanCollector = struct {
+    spans: std.ArrayList(TextSpan),
+    text_buffer: std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    current_x: f64 = 0,
+    current_y: f64 = 0,
+    current_font_size: f64 = 12,
+    avg_char_width: f64 = 0.5,
+
+    pub fn init(allocator: std.mem.Allocator) SpanCollector {
+        return .{
+            .spans = .empty,
+            .text_buffer = .empty,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *SpanCollector) void {
+        self.spans.deinit(self.allocator);
+        self.text_buffer.deinit(self.allocator);
+    }
+
+    pub fn setPosition(self: *SpanCollector, x: f64, y: f64) void {
+        self.current_x = x;
+        self.current_y = y;
+    }
+
+    pub fn setFontSize(self: *SpanCollector, size: f64) void {
+        self.current_font_size = size;
+    }
+
+    pub fn writeAll(self: *SpanCollector, data: []const u8) !void {
+        try self.text_buffer.appendSlice(self.allocator, data);
+    }
+
+    pub fn writeByte(self: *SpanCollector, byte: u8) !void {
+        try self.text_buffer.append(self.allocator, byte);
+    }
+
+    pub fn print(_: *SpanCollector, comptime _: []const u8, _: anytype) !void {}
+
+    pub fn flush(self: *SpanCollector) !void {
+        if (self.text_buffer.items.len == 0) return;
+
+        const text = try self.allocator.dupe(u8, self.text_buffer.items);
+        const width = @as(f64, @floatFromInt(text.len)) * self.current_font_size * self.avg_char_width;
+        const height = self.current_font_size * 1.2;
+
+        try self.spans.append(self.allocator, .{
+            .x0 = self.current_x,
+            .y0 = self.current_y,
+            .x1 = self.current_x + width,
+            .y1 = self.current_y + height,
+            .text = text,
+            .font_size = self.current_font_size,
+        });
+
+        self.current_x += width;
+        self.text_buffer.clearRetainingCapacity();
+    }
+
+    pub fn getSpans(self: *SpanCollector) []const TextSpan {
+        return self.spans.items;
+    }
+
+    pub fn toOwnedSlice(self: *SpanCollector) ![]TextSpan {
+        return self.spans.toOwnedSlice(self.allocator);
+    }
+};
 
 /// Operand types for content stream
 pub const Operand = union(enum) {
