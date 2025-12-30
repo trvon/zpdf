@@ -14,29 +14,37 @@ A PDF text extraction library written in Zig.
 
 ## Benchmark
 
-Text extraction performance vs MuPDF 1.26 (`mutool convert -F text`):
+Text extraction performance vs MuPDF 1.26 (`mutool convert -F text`) on Apple M4 Pro:
 
 ### Sequential
 
 | Document | Pages | Size | zpdf | MuPDF | Speedup |
 |----------|-------|------|------|-------|---------|
-| [Adobe Acrobat Reference](https://helpx.adobe.com/pdf/acrobat_reference.pdf) | 651 | 19 MB | 137 ms | 530 ms | **3.9x** |
-| [C++ Standard Draft](https://open-std.org/jtc1/sc22/wg21/docs/papers/2023/n4950.pdf) | 2,134 | 8 MB | 276 ms | 1,038 ms | **3.8x** |
-| [Pandas Documentation](https://pandas.pydata.org/pandas-docs/version/1.4/pandas.pdf) | 3,743 | 15 MB | 447 ms | 1,216 ms | **2.7x** |
-| [Intel SDM](https://cdrdv2.intel.com/v1/dl/getContent/671200) | 5,252 | 25 MB | 508 ms | 2,250 ms | **4.4x** |
+| [C++ Standard Draft](https://open-std.org/jtc1/sc22/wg21/docs/papers/2023/n4950.pdf) | 2,134 | 8 MB | 250 ms | 968 ms | **3.9x** |
+| [Pandas Documentation](https://pandas.pydata.org/pandas-docs/version/1.4/pandas.pdf) | 3,743 | 15 MB | 395 ms | 1,112 ms | **2.8x** |
+| [Intel SDM](https://cdrdv2.intel.com/v1/dl/getContent/671200) | 5,252 | 25 MB | 451 ms | 2,099 ms | **4.7x** |
 
-### Parallel (multi-threaded)
+### Parallel (default)
 
 | Document | Pages | Size | zpdf | MuPDF | Speedup |
 |----------|-------|------|------|-------|---------|
-| Adobe Acrobat Reference | 651 | 19 MB | 60 ms | 512 ms | **8.5x** |
-| C++ Standard Draft | 2,134 | 8 MB | 142 ms | 1,020 ms | **7.2x** |
-| Pandas Documentation | 3,743 | 15 MB | 233 ms | 1,204 ms | **5.2x** |
-| Intel SDM | 5,252 | 25 MB | 127 ms | 2,260 ms | **18x** |
+| C++ Standard Draft | 2,134 | 8 MB | 131 ms | 966 ms | **7.4x** |
+| Pandas Documentation | 3,743 | 15 MB | 218 ms | 1,117 ms | **5.1x** |
+| Intel SDM | 5,252 | 25 MB | 117 ms | 2,098 ms | **17.9x** |
 
-Peak throughput: **41,000 pages/sec** (Intel SDM, parallel)
+Peak throughput: **45,000 pages/sec** (Intel SDM, parallel)
 
 Build with `zig build -Doptimize=ReleaseFast` for these results.
+
+### SIMD Acceleration
+
+zpdf uses SIMD-accelerated routines for hot paths:
+- Whitespace skipping (content streams are whitespace-heavy)
+- Delimiter detection (tokenization)
+- Keyword search (`stream`, `endstream`, `startxref`)
+- String boundary scanning
+
+Auto-detects: NEON (ARM64), AVX2/SSE4.2 (x86_64), or scalar fallback.
 
 *Note: MuPDF's threading (`-T` flag) is for rendering/rasterization only. Text extraction via `mutool convert -F text` is single-threaded by design. zpdf parallelizes text extraction across pages.*
 
