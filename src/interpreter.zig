@@ -488,7 +488,6 @@ pub const ContentLexer = struct {
     fn skipWhitespaceAndComments(self: *ContentLexer) void {
         while (self.pos < self.data.len) {
             const c = self.data[self.pos];
-
             if (c == ' ' or c == '\t' or c == '\n' or c == '\r' or c == 0x0C or c == 0x00) {
                 self.pos += 1;
             } else if (c == '%') {

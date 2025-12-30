@@ -247,12 +247,14 @@ fn runBench(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     const path = args[0];
+    const parallel = args.len > 1 and std.mem.eql(u8, args[1], "--parallel");
+
     var stdout_buf: [4096]u8 = undefined;
     var stdout_bw = std.fs.File.stdout().writer(&stdout_buf);
     const stdout = &stdout_bw.interface;
     defer stdout.flush() catch {};
 
-    try stdout.print("Benchmarking: {s}\n\n", .{path});
+    try stdout.print("Benchmarking: {s}{s}\n\n", .{ path, if (parallel) " (parallel)" else "" });
 
     const RUNS = 5;
     var times: [RUNS]i64 = undefined;
@@ -267,9 +269,17 @@ fn runBench(allocator: std.mem.Allocator, args: []const []const u8) !void {
         };
         page_count = doc.pages.items.len;
 
-        var counter = CharCounter{};
-        for (0..doc.pages.items.len) |page_num| {
-            doc.extractText(page_num, &counter) catch continue;
+        if (parallel) {
+            const result = doc.extractAllTextParallel(allocator) catch {
+                doc.close();
+                continue;
+            };
+            allocator.free(result);
+        } else {
+            var counter = CharCounter{};
+            for (0..doc.pages.items.len) |page_num| {
+                doc.extractText(page_num, &counter) catch continue;
+            }
         }
 
         doc.close();
@@ -300,7 +310,7 @@ fn runBench(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // Try to run mutool for comparison
     try stdout.writeAll("\nAttempting mutool comparison...\n");
 
-    var child = std.process.Child.init(&.{ "mutool", "draw", "-F", "txt", "-o", "/dev/null", path }, allocator);
+    var child = std.process.Child.init(&.{ "mutool", "convert", "-F", "text", "-o", "/dev/null", path }, allocator);
     child.stderr_behavior = .Ignore;
     child.stdout_behavior = .Ignore;
 

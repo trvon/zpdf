@@ -299,6 +299,105 @@ pub const Document = struct {
         }
     }
 
+    /// Extract text from all pages in parallel (returns concatenated result)
+    pub fn extractAllTextParallel(self: *Document, allocator: std.mem.Allocator) ![]u8 {
+        const num_pages = self.pages.items.len;
+        if (num_pages == 0) return try allocator.alloc(u8, 0);
+
+        // Allocate result buffers for each page
+        const results = try allocator.alloc([]u8, num_pages);
+        defer allocator.free(results);
+        @memset(results, &[_]u8{});
+
+        const Thread = std.Thread;
+        const cpu_count = Thread.getCpuCount() catch 4;
+        const num_threads: usize = @min(num_pages, @min(cpu_count, 8));
+
+        const Context = struct {
+            doc: *Document,
+            results: [][]u8,
+            alloc: std.mem.Allocator,
+        };
+
+        const ctx = Context{
+            .doc = self,
+            .results = results,
+            .alloc = allocator,
+        };
+
+        // Thread worker - each thread uses its own arena and cache
+        const worker = struct {
+            fn run(c: Context, start: usize, end: usize) void {
+                // Thread-local arena for all allocations
+                var arena = std.heap.ArenaAllocator.init(c.alloc);
+                defer arena.deinit();
+                const thread_alloc = arena.allocator();
+
+                // Thread-local object cache
+                var local_cache = std.AutoHashMap(u32, Object).init(thread_alloc);
+                defer local_cache.deinit();
+
+                for (start..end) |page_num| {
+                    // Extract directly to fixed buffer to avoid allocations
+                    var buf: [65536]u8 = undefined;
+                    var fbs = std.io.fixedBufferStream(&buf);
+
+                    const page = c.doc.pages.items[page_num];
+                    const content = pagetree.getPageContents(
+                        thread_alloc,
+                        c.doc.data,
+                        &c.doc.xref_table,
+                        page,
+                        &local_cache,
+                    ) catch continue;
+
+                    extractTextFromContent(content, page.resources, fbs.writer()) catch continue;
+
+                    if (fbs.pos > 0) {
+                        c.results[page_num] = c.alloc.dupe(u8, buf[0..fbs.pos]) catch &[_]u8{};
+                    }
+                }
+            }
+        }.run;
+
+        // Spawn threads
+        var threads: [8]?Thread = [_]?Thread{null} ** 8;
+        const pages_per_thread = (num_pages + num_threads - 1) / num_threads;
+
+        for (0..num_threads) |i| {
+            const start = i * pages_per_thread;
+            const end = @min(start + pages_per_thread, num_pages);
+            if (start < end) {
+                threads[i] = Thread.spawn(.{}, worker, .{ ctx, start, end }) catch null;
+            }
+        }
+
+        // Wait for all threads
+        for (&threads) |*t| {
+            if (t.*) |thread| thread.join();
+        }
+
+        // Calculate total size and concatenate
+        var total_size: usize = 0;
+        for (results) |r| total_size += r.len + 1;
+
+        var output = try allocator.alloc(u8, total_size);
+        var pos: usize = 0;
+        for (results, 0..) |r, i| {
+            if (i > 0 and pos < output.len) {
+                output[pos] = '\x0c';
+                pos += 1;
+            }
+            if (r.len > 0) {
+                @memcpy(output[pos..][0..r.len], r);
+                pos += r.len;
+                allocator.free(r);
+            }
+        }
+
+        return output[0..pos];
+    }
+
     /// Get page metadata
     pub fn getPageInfo(self: *const Document, page_num: usize) ?PageInfo {
         if (page_num >= self.pages.items.len) return null;
@@ -363,46 +462,53 @@ fn extractTextFromContent(content: []const u8, resources: ?Object.Dict, writer: 
                 }
             },
             .operator => |op| {
-                // Text object
-                if (std.mem.eql(u8, op, "BT")) {
-                    in_text = true;
-                } else if (std.mem.eql(u8, op, "ET")) {
-                    in_text = false;
-                }
-                // Font
-                else if (std.mem.eql(u8, op, "Tf") and operand_count >= 2) {
-                    font_size = operands[1].number;
-                }
-                // Text positioning
-                else if (std.mem.eql(u8, op, "Td") or std.mem.eql(u8, op, "TD")) {
-                    if (operand_count >= 2) {
-                        const ty = operands[1].number;
-                        if (@abs(ty) > font_size * 0.5 and prev_y != 0) {
+                // Fast path: switch on first character to minimize string comparisons
+                if (op.len > 0) switch (op[0]) {
+                    'B' => if (op.len == 2 and op[1] == 'T') {
+                        in_text = true;
+                    },
+                    'E' => if (op.len == 2 and op[1] == 'T') {
+                        in_text = false;
+                    },
+                    'T' => if (op.len == 2) switch (op[1]) {
+                        'f' => if (operand_count >= 2) {
+                            font_size = operands[1].number;
+                        },
+                        'd', 'D' => if (operand_count >= 2) {
+                            const ty = operands[1].number;
+                            if (@abs(ty) > font_size * 0.5 and prev_y != 0) {
+                                try writer.writeByte('\n');
+                            }
+                            prev_y = ty;
+                        },
+                        'm' => if (operand_count >= 6) {
+                            const ty = operands[5].number;
+                            if (@abs(ty - prev_y) > font_size * 0.5 and prev_y != 0) {
+                                try writer.writeByte('\n');
+                            }
+                            prev_y = ty;
+                        },
+                        '*' => {
                             try writer.writeByte('\n');
-                        }
-                        prev_y = ty;
-                    }
-                } else if (std.mem.eql(u8, op, "Tm") and operand_count >= 6) {
-                    const ty = operands[5].number;
-                    if (@abs(ty - prev_y) > font_size * 0.5 and prev_y != 0) {
+                        },
+                        'j' => if (operand_count >= 1) {
+                            try writeTextOperand(operands[0], writer);
+                        },
+                        'J' => if (operand_count >= 1) {
+                            try writeTJArray(operands[0], writer);
+                        },
+                        else => {},
+                    },
+                    '\'' => if (operand_count >= 1) {
                         try writer.writeByte('\n');
-                    }
-                    prev_y = ty;
-                } else if (std.mem.eql(u8, op, "T*")) {
-                    try writer.writeByte('\n');
-                }
-                // Show text
-                else if (std.mem.eql(u8, op, "Tj") and operand_count >= 1) {
-                    try writeTextOperand(operands[0], writer);
-                } else if (std.mem.eql(u8, op, "TJ") and operand_count >= 1) {
-                    try writeTJArray(operands[0], writer);
-                } else if (std.mem.eql(u8, op, "'") and operand_count >= 1) {
-                    try writer.writeByte('\n');
-                    try writeTextOperand(operands[0], writer);
-                } else if (std.mem.eql(u8, op, "\"") and operand_count >= 3) {
-                    try writer.writeByte('\n');
-                    try writeTextOperand(operands[2], writer);
-                }
+                        try writeTextOperand(operands[0], writer);
+                    },
+                    '"' => if (operand_count >= 3) {
+                        try writer.writeByte('\n');
+                        try writeTextOperand(operands[2], writer);
+                    },
+                    else => {},
+                };
 
                 operand_count = 0;
             },

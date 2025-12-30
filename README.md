@@ -10,19 +10,31 @@ A PDF text extraction library written in Zig.
 - Font encoding support: WinAnsi, MacRoman, ToUnicode CMap
 - XRef table and stream parsing (PDF 1.5+)
 - Configurable error handling (strict or permissive)
+- Multi-threaded parallel page extraction
 
 ## Benchmark
 
 Text extraction performance vs MuPDF 1.26 (`mutool convert -F text`):
 
+### Sequential
+
 | Document | Pages | Size | zpdf | MuPDF | Speedup |
 |----------|-------|------|------|-------|---------|
-| [Adobe Acrobat Reference](https://helpx.adobe.com/pdf/acrobat_reference.pdf) | 651 | 19 MB | 116 ms | 474 ms | **4.1x** |
-| [Pandas Documentation](https://pandas.pydata.org/pandas-docs/version/1.4/pandas.pdf) | 3,743 | 15 MB | 396 ms | 1,095 ms | **2.8x** |
+| [Adobe Acrobat Reference](https://helpx.adobe.com/pdf/acrobat_reference.pdf) | 651 | 19 MB | 117 ms | 470 ms | **4.0x** |
+| [Pandas Documentation](https://pandas.pydata.org/pandas-docs/version/1.4/pandas.pdf) | 3,743 | 15 MB | 414 ms | 1,157 ms | **2.8x** |
 
-Peak throughput: **9,452 pages/sec** (Pandas manual)
+### Parallel (multi-threaded)
+
+| Document | Pages | Size | zpdf | MuPDF | Speedup |
+|----------|-------|------|------|-------|---------|
+| Adobe Acrobat Reference | 651 | 19 MB | 56 ms | 470 ms | **8.4x** |
+| Pandas Documentation | 3,743 | 15 MB | 212 ms | 1,157 ms | **5.5x** |
+
+Peak throughput: **17,620 pages/sec** (Pandas, parallel)
 
 Build with `zig build -Doptimize=ReleaseFast` for these results.
+
+*Note: MuPDF's C library supports multi-threading, but the Homebrew CLI build (`mutool`) has it disabled. Comparison uses the default Homebrew mutool.*
 
 ## Requirements
 
@@ -97,7 +109,6 @@ Implemented:
 
 Not yet implemented:
 - CID font handling
-- Parallel page extraction
 - Incremental PDF updates
 
 ## License
