@@ -11,6 +11,15 @@ A PDF text extraction library written in Zig.
 - XRef table and stream parsing (PDF 1.5+)
 - Configurable error handling (strict or permissive)
 
+## Benchmark
+
+Tested on US Constitution PDF (85 pages, 3.8MB):
+
+| Tool | Time | Pages/sec | Speedup |
+|------|------|-----------|---------|
+| zpdf | 37 ms | 2,273 | **32x** |
+| MuPDF (mutool) | 1,211 ms | 70 | 1x |
+
 ## Requirements
 
 - Zig 0.15.2 or later
