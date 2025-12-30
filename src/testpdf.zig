@@ -82,32 +82,34 @@ pub fn generateMinimalPdf(allocator: std.mem.Allocator, text: []const u8) ![]u8 
 
 /// Generate a PDF with multiple pages
 pub fn generateMultiPagePdf(allocator: std.mem.Allocator, pages_text: []const []const u8) ![]u8 {
-    var pdf = std.ArrayList(u8).init(allocator);
-    errdefer pdf.deinit();
+    var pdf: std.ArrayList(u8) = .empty;
+    errdefer pdf.deinit(allocator);
 
-    const writer = pdf.writer();
-    var offsets = std.ArrayList(u64).init(allocator);
-    defer offsets.deinit();
+    var writer = pdf.writer(allocator);
+    var offsets: std.ArrayList(u64) = .empty;
+    defer offsets.deinit(allocator);
 
     // Header
     try writer.writeAll("%PDF-1.4\n");
     try writer.writeAll("%\xE2\xE3\xCF\xD3\n");
 
     // Object 1: Catalog
-    try offsets.append(pdf.items.len);
+    try offsets.append(allocator, pdf.items.len);
     try writer.writeAll("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
 
     // Object 2: Pages - build kids array dynamically
-    try offsets.append(pdf.items.len);
+    // Object layout: 1=Catalog, 2=Pages, 3=Font, then pairs of (Page, Content)
+    // So pages are at 4, 6, 8, ... (4 + i*2)
+    try offsets.append(allocator, pdf.items.len);
     try writer.writeAll("2 0 obj\n<< /Type /Pages /Kids [");
     for (0..pages_text.len) |i| {
         if (i > 0) try writer.writeByte(' ');
-        try writer.print("{} 0 R", .{3 + i * 2}); // Page objects at 3, 5, 7, ...
+        try writer.print("{} 0 R", .{4 + i * 2}); // Page objects at 4, 6, 8, ...
     }
     try writer.print("] /Count {} >>\nendobj\n", .{pages_text.len});
 
     // Object 3: Font (shared)
-    try offsets.append(pdf.items.len);
+    try offsets.append(allocator, pdf.items.len);
     try writer.writeAll("3 0 obj\n");
     try writer.writeAll("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica ");
     try writer.writeAll("/Encoding /WinAnsiEncoding >>\nendobj\n");
@@ -119,20 +121,21 @@ pub fn generateMultiPagePdf(allocator: std.mem.Allocator, pages_text: []const []
         const content_obj = page_obj + 1;
 
         // Page object
-        try offsets.append(pdf.items.len);
+        try offsets.append(allocator, pdf.items.len);
         try writer.print("{} 0 obj\n", .{page_obj});
         try writer.writeAll("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] ");
         try writer.print("/Contents {} 0 R /Resources << /Font << /F1 3 0 R >> >> >>\n", .{content_obj});
         try writer.writeAll("endobj\n");
 
         // Content stream
-        var content = std.ArrayList(u8).init(allocator);
-        defer content.deinit();
-        try content.writer().writeAll("BT\n/F1 12 Tf\n100 700 Td\n");
-        try content.writer().print("({s}) Tj\n", .{text});
-        try content.writer().writeAll("ET\n");
+        var content: std.ArrayList(u8) = .empty;
+        defer content.deinit(allocator);
+        var cw = content.writer(allocator);
+        try cw.writeAll("BT\n/F1 12 Tf\n100 700 Td\n");
+        try cw.print("({s}) Tj\n", .{text});
+        try cw.writeAll("ET\n");
 
-        try offsets.append(pdf.items.len);
+        try offsets.append(allocator, pdf.items.len);
         try writer.print("{} 0 obj\n<< /Length {} >>\nstream\n", .{ content_obj, content.items.len });
         try writer.writeAll(content.items);
         try writer.writeAll("\nendstream\nendobj\n");
@@ -155,15 +158,15 @@ pub fn generateMultiPagePdf(allocator: std.mem.Allocator, pages_text: []const []
     try writer.print("startxref\n{}\n", .{xref_offset});
     try writer.writeAll("%%EOF\n");
 
-    return pdf.toOwnedSlice();
+    return pdf.toOwnedSlice(allocator);
 }
 
 /// Generate a PDF with TJ operator (array-based text)
 pub fn generateTJPdf(allocator: std.mem.Allocator) ![]u8 {
-    var pdf = std.ArrayList(u8).init(allocator);
-    errdefer pdf.deinit();
+    var pdf: std.ArrayList(u8) = .empty;
+    errdefer pdf.deinit(allocator);
 
-    const writer = pdf.writer();
+    var writer = pdf.writer(allocator);
 
     try writer.writeAll("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
 
@@ -193,7 +196,101 @@ pub fn generateTJPdf(allocator: std.mem.Allocator) ![]u8 {
     try writer.writeAll("trailer\n<< /Size 6 /Root 1 0 R >>\n");
     try writer.print("startxref\n{}\n%%EOF\n", .{xref_offset});
 
-    return pdf.toOwnedSlice();
+    return pdf.toOwnedSlice(allocator);
+}
+
+/// Generate a PDF with a CID font (Type0 composite font with ToUnicode)
+/// Uses UTF-16BE encoded text and a ToUnicode CMap for mapping
+pub fn generateCIDFontPdf(allocator: std.mem.Allocator) ![]u8 {
+    var pdf: std.ArrayList(u8) = .empty;
+    errdefer pdf.deinit(allocator);
+
+    var writer = pdf.writer(allocator);
+
+    try writer.writeAll("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
+
+    // Object 1: Catalog
+    const obj1_offset = pdf.items.len;
+    try writer.writeAll("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+
+    // Object 2: Pages
+    const obj2_offset = pdf.items.len;
+    try writer.writeAll("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+
+    // Object 3: Page
+    const obj3_offset = pdf.items.len;
+    try writer.writeAll("3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] ");
+    try writer.writeAll("/Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n");
+
+    // Object 4: Content stream with UTF-16BE encoded text
+    // "Hello" in UTF-16BE: 0048 0065 006C 006C 006F
+    // Plus "中" (U+4E2D) in UTF-16BE: 4E2D
+    const content = "BT\n/F1 12 Tf\n100 700 Td\n<00480065006C006C006F20004E2D> Tj\nET\n";
+
+    const obj4_offset = pdf.items.len;
+    try writer.print("4 0 obj\n<< /Length {} >>\nstream\n{s}\nendstream\nendobj\n", .{ content.len, content });
+
+    // Object 5: Type0 Font (Composite font)
+    const obj5_offset = pdf.items.len;
+    try writer.writeAll("5 0 obj\n");
+    try writer.writeAll("<< /Type /Font /Subtype /Type0 /BaseFont /TestCIDFont\n");
+    try writer.writeAll("   /Encoding /Identity-H\n");
+    try writer.writeAll("   /DescendantFonts [6 0 R]\n");
+    try writer.writeAll("   /ToUnicode 7 0 R >>\n");
+    try writer.writeAll("endobj\n");
+
+    // Object 6: CIDFont
+    const obj6_offset = pdf.items.len;
+    try writer.writeAll("6 0 obj\n");
+    try writer.writeAll("<< /Type /Font /Subtype /CIDFontType2 /BaseFont /TestCIDFont\n");
+    try writer.writeAll("   /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>\n");
+    try writer.writeAll("   /W [0 [500]] >>\n"); // Simple width array
+    try writer.writeAll("endobj\n");
+
+    // Object 7: ToUnicode CMap
+    const tounicode_cmap =
+        \\/CIDInit /ProcSet findresource begin
+        \\12 dict begin
+        \\begincmap
+        \\/CMapType 2 def
+        \\/CMapName /TestCMap def
+        \\1 begincodespacerange
+        \\<0000> <FFFF>
+        \\endcodespacerange
+        \\7 beginbfchar
+        \\<0048> <0048>
+        \\<0065> <0065>
+        \\<006C> <006C>
+        \\<006F> <006F>
+        \\<0020> <0020>
+        \\<0000> <0000>
+        \\<4E2D> <4E2D>
+        \\endbfchar
+        \\endcmap
+        \\CMapName currentdict /CMap defineresource pop
+        \\end
+        \\end
+    ;
+
+    const obj7_offset = pdf.items.len;
+    try writer.print("7 0 obj\n<< /Length {} >>\nstream\n{s}\nendstream\nendobj\n", .{ tounicode_cmap.len, tounicode_cmap });
+
+    // XRef table
+    const xref_offset = pdf.items.len;
+    try writer.writeAll("xref\n0 8\n");
+    try writer.writeAll("0000000000 65535 f \n");
+    try writer.print("{d:0>10} 00000 n \n", .{obj1_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj2_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj3_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj4_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj5_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj6_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj7_offset});
+
+    try writer.writeAll("trailer\n<< /Size 8 /Root 1 0 R >>\n");
+    try writer.print("startxref\n{}\n%%EOF\n", .{xref_offset});
+
+    return pdf.toOwnedSlice(allocator);
 }
 
 // ============================================================================
@@ -221,4 +318,105 @@ test "generate multi-page PDF" {
 
     try std.testing.expect(std.mem.startsWith(u8, pdf_data, "%PDF-1.4"));
     try std.testing.expect(std.mem.indexOf(u8, pdf_data, "/Count 3") != null);
+}
+
+test "generate CID font PDF" {
+    const pdf_data = try generateCIDFontPdf(std.testing.allocator);
+    defer std.testing.allocator.free(pdf_data);
+
+    try std.testing.expect(std.mem.startsWith(u8, pdf_data, "%PDF-1.4"));
+    // Should have Type0 font
+    try std.testing.expect(std.mem.indexOf(u8, pdf_data, "/Subtype /Type0") != null);
+    // Should have ToUnicode CMap
+    try std.testing.expect(std.mem.indexOf(u8, pdf_data, "beginbfchar") != null);
+    // Should have Identity-H encoding
+    try std.testing.expect(std.mem.indexOf(u8, pdf_data, "/Identity-H") != null);
+}
+
+/// Generate a PDF with incremental updates
+/// Creates a base PDF, then appends an incremental update that modifies the content
+pub fn generateIncrementalPdf(allocator: std.mem.Allocator) ![]u8 {
+    var pdf: std.ArrayList(u8) = .empty;
+    errdefer pdf.deinit(allocator);
+
+    var writer = pdf.writer(allocator);
+
+    // ===== ORIGINAL PDF =====
+    try writer.writeAll("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
+
+    // Object 1: Catalog
+    const obj1_offset = pdf.items.len;
+    try writer.writeAll("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+
+    // Object 2: Pages
+    const obj2_offset = pdf.items.len;
+    try writer.writeAll("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+
+    // Object 3: Page
+    const obj3_offset = pdf.items.len;
+    try writer.writeAll("3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] ");
+    try writer.writeAll("/Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n");
+
+    // Object 4: Content (original text: "Original Text")
+    const content1 = "BT\n/F1 12 Tf\n100 700 Td\n(Original Text) Tj\nET\n";
+    const obj4_offset = pdf.items.len;
+    try writer.print("4 0 obj\n<< /Length {} >>\nstream\n{s}\nendstream\nendobj\n", .{ content1.len, content1 });
+
+    // Object 5: Font
+    const obj5_offset = pdf.items.len;
+    try writer.writeAll("5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n");
+
+    // Original XRef table
+    const xref1_offset = pdf.items.len;
+    try writer.writeAll("xref\n0 6\n");
+    try writer.writeAll("0000000000 65535 f \n");
+    try writer.print("{d:0>10} 00000 n \n", .{obj1_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj2_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj3_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj4_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj5_offset});
+
+    try writer.writeAll("trailer\n<< /Size 6 /Root 1 0 R >>\n");
+    try writer.print("startxref\n{}\n%%EOF\n", .{xref1_offset});
+
+    // ===== INCREMENTAL UPDATE =====
+    // Replace object 4 with new content
+
+    // New Object 4: Updated content (now says "Updated Text")
+    const content2 = "BT\n/F1 12 Tf\n100 700 Td\n(Updated Text) Tj\nET\n";
+    const new_obj4_offset = pdf.items.len;
+    try writer.print("4 0 obj\n<< /Length {} >>\nstream\n{s}\nendstream\nendobj\n", .{ content2.len, content2 });
+
+    // Incremental XRef table (only updated objects)
+    const xref2_offset = pdf.items.len;
+    try writer.writeAll("xref\n4 1\n"); // Only object 4 is updated
+    try writer.print("{d:0>10} 00000 n \n", .{new_obj4_offset});
+
+    try writer.writeAll("trailer\n");
+    try writer.print("<< /Size 6 /Root 1 0 R /Prev {} >>\n", .{xref1_offset});
+    try writer.print("startxref\n{}\n%%EOF\n", .{xref2_offset});
+
+    return pdf.toOwnedSlice(allocator);
+}
+
+test "generate incremental PDF" {
+    const pdf_data = try generateIncrementalPdf(std.testing.allocator);
+    defer std.testing.allocator.free(pdf_data);
+
+    try std.testing.expect(std.mem.startsWith(u8, pdf_data, "%PDF-1.4"));
+    // Should have two %%EOF markers (original + incremental update)
+    var count: usize = 0;
+    var pos: usize = 0;
+    while (std.mem.indexOfPos(u8, pdf_data, pos, "%%EOF")) |idx| {
+        count += 1;
+        pos = idx + 5;
+    }
+    try std.testing.expectEqual(@as(usize, 2), count);
+
+    // Should have /Prev reference
+    try std.testing.expect(std.mem.indexOf(u8, pdf_data, "/Prev") != null);
+
+    // Should contain both texts (though only "Updated Text" should be extracted)
+    try std.testing.expect(std.mem.indexOf(u8, pdf_data, "Original Text") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pdf_data, "Updated Text") != null);
 }

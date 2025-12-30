@@ -637,12 +637,12 @@ test "decodeASCIIHex with whitespace" {
 test "decodeASCII85" {
     const allocator = std.testing.allocator;
 
-    // "Hello" in ASCII85
+    // "Hello world" in ASCII85
     const input = "87cURD]j7BEbo7~>";
     const result = try decodeASCII85(allocator, input);
     defer allocator.free(result);
 
-    try std.testing.expectEqualStrings("Hello!!\n", result);
+    try std.testing.expectEqualStrings("Hello world", result);
 }
 
 test "decodeRunLength" {

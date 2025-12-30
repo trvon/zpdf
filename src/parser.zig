@@ -721,9 +721,12 @@ test "parse complex object" {
         \\>>
     ;
 
-    var parser = Parser.init(std.testing.allocator, input);
+    // Use arena allocator since parser allocates nested objects
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var parser = Parser.init(arena.allocator(), input);
     const obj = try parser.parseObject();
-    defer std.testing.allocator.free(obj.dict.entries);
 
     try std.testing.expectEqualStrings("Page", obj.dict.getName("Type").?);
 

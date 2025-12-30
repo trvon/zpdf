@@ -550,6 +550,6 @@ test "findAllSubstrings" {
 
     try std.testing.expectEqual(@as(usize, 4), iter.next().?);
     try std.testing.expectEqual(@as(usize, 15), iter.next().?);
-    try std.testing.expectEqual(@as(usize, 27), iter.next().?);
+    try std.testing.expectEqual(@as(usize, 28), iter.next().?);
     try std.testing.expect(iter.next() == null);
 }

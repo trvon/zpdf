@@ -101,15 +101,13 @@ src/
 
 Implemented:
 - XRef table and stream parsing
+- Incremental PDF updates (follows /Prev chain for modified documents)
 - Object parser
 - Page tree resolution
 - Content stream interpretation (Tj, TJ, Tm, Td, etc.)
-- Font encoding (WinAnsi, MacRoman, CMap)
-- Stream decompression
-
-Not yet implemented:
-- CID font handling
-- Incremental PDF updates
+- Font encoding (WinAnsi, MacRoman, ToUnicode CMap)
+- CID font handling (Type0 composite fonts, Identity-H/V encoding, UTF-16BE)
+- Stream decompression (FlateDecode, ASCII85, ASCIIHex, LZW, RunLength)
 
 ## License
 

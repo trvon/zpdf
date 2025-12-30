@@ -59,7 +59,9 @@ pub const FontEncoding = struct {
 
     /// Decode a string to Unicode using this encoding
     pub fn decode(self: *const FontEncoding, data: []const u8, writer: anytype) !void {
-        if (self.is_cid and self.cmap_ranges.len > 0) {
+        if (self.is_cid) {
+            // For CID fonts, use CID decoding even without CMap ranges
+            // (Identity encoding uses UTF-16BE directly)
             try self.decodeCID(data, writer);
         } else {
             try self.decodeSimple(data, writer);
@@ -92,15 +94,46 @@ pub const FontEncoding = struct {
 
             i += code.bytes_consumed;
 
-            // Look up in CMap ranges
-            const codepoint = self.lookupCMap(code.value) orelse code.value;
+            // Look up in CMap ranges first
+            var codepoint = self.lookupCMap(code.value);
 
-            if (codepoint == 0) {
+            // If no CMap mapping, try Identity interpretation
+            if (codepoint == null) {
+                // For Identity-H/Identity-V, the code might be UTF-16BE
+                if (code.bytes_consumed == 2) {
+                    const potential_unicode = code.value;
+                    // Check if it's a valid Unicode codepoint
+                    if (potential_unicode > 0 and potential_unicode <= 0x10FFFF) {
+                        // Check if it's a surrogate pair (UTF-16)
+                        if (potential_unicode >= 0xD800 and potential_unicode <= 0xDBFF) {
+                            // High surrogate - need to read low surrogate
+                            if (i + 2 <= data.len) {
+                                const low: u32 = (@as(u32, data[i]) << 8) | data[i + 1];
+                                if (low >= 0xDC00 and low <= 0xDFFF) {
+                                    // Valid surrogate pair
+                                    codepoint = 0x10000 + ((potential_unicode - 0xD800) << 10) + (low - 0xDC00);
+                                    i += 2;
+                                }
+                            }
+                        } else if (potential_unicode < 0xD800 or potential_unicode > 0xDFFF) {
+                            // Not a surrogate - direct BMP character
+                            codepoint = potential_unicode;
+                        }
+                    }
+                }
+            }
+
+            const final_codepoint = codepoint orelse code.value;
+
+            if (final_codepoint == 0) {
                 try writer.writeByte(' ');
-            } else {
+            } else if (final_codepoint <= 0x10FFFF) {
                 var buf: [4]u8 = undefined;
-                const len = std.unicode.utf8Encode(@intCast(codepoint), &buf) catch 1;
+                const len = std.unicode.utf8Encode(@intCast(final_codepoint), &buf) catch 1;
                 try writer.writeAll(buf[0..len]);
+            } else {
+                // Invalid codepoint
+                try writer.writeByte(' ');
             }
         }
     }
@@ -113,16 +146,13 @@ pub const FontEncoding = struct {
             return .{ .value = data[0], .bytes_consumed = 1 };
         }
 
-        // For CID fonts, try 2 bytes first
-        if (data.len >= 2) {
+        // For CID fonts, always read bytes_per_char bytes
+        if (self.bytes_per_char == 2 and data.len >= 2) {
             const code = (@as(u32, data[0]) << 8) | data[1];
-            // Check if this code exists in ranges
-            if (self.codeInRanges(code)) {
-                return .{ .value = code, .bytes_consumed = 2 };
-            }
+            return .{ .value = code, .bytes_consumed = 2 };
         }
 
-        // Fall back to 1 byte
+        // Fall back to 1 byte only if we don't have enough data
         return .{ .value = data[0], .bytes_consumed = 1 };
     }
 
@@ -157,7 +187,59 @@ pub fn parseFontEncoding(
 ) !FontEncoding {
     var encoding = FontEncoding.init(allocator);
 
-    // Check for ToUnicode CMap first (highest priority)
+    // Detect font type first
+    const subtype = font_dict.getName("Subtype");
+    const is_type0 = subtype != null and std.mem.eql(u8, subtype.?, "Type0");
+
+    // For Type0 (composite) fonts, check DescendantFonts
+    if (is_type0) {
+        encoding.is_cid = true;
+        encoding.bytes_per_char = 2;
+
+        // Parse CMap encoding for Type0 fonts
+        if (font_dict.get("Encoding")) |enc_obj| {
+            const resolved = resolve_fn(enc_obj) catch enc_obj;
+            switch (resolved) {
+                .name => |name| applyPredefinedCMap(&encoding, name),
+                .stream => |stream| {
+                    // Embedded CMap stream - parse it
+                    try parseToUnicode(allocator, stream, &encoding);
+                },
+                else => {},
+            }
+        }
+
+        // Get CIDFont from DescendantFonts array
+        if (font_dict.getArray("DescendantFonts")) |descendants| {
+            if (descendants.len > 0) {
+                const cid_font_obj = resolve_fn(descendants[0]) catch descendants[0];
+                if (cid_font_obj == .dict) {
+                    const cid_font = cid_font_obj.dict;
+
+                    // Check CIDFont subtype for additional info
+                    const cid_subtype = cid_font.getName("Subtype");
+                    if (cid_subtype) |cst| {
+                        if (std.mem.eql(u8, cst, "CIDFontType2")) {
+                            // TrueType-based CID font - may need CIDToGIDMap
+                            // Identity mapping is common and means CID = GID
+                        }
+                    }
+
+                    // Check for ToUnicode in CIDFont (rare but possible)
+                    if (encoding.cmap_ranges.len == 0) {
+                        if (cid_font.get("ToUnicode")) |tounicode| {
+                            const tu_resolved = resolve_fn(tounicode) catch tounicode;
+                            if (tu_resolved == .stream) {
+                                try parseToUnicode(allocator, tu_resolved.stream, &encoding);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Check for ToUnicode CMap (highest priority for all fonts)
     if (font_dict.get("ToUnicode")) |tounicode| {
         const resolved = resolve_fn(tounicode) catch tounicode;
         if (resolved == .stream) {
@@ -166,41 +248,76 @@ pub fn parseFontEncoding(
         }
     }
 
-    // Check for Encoding
-    if (font_dict.get("Encoding")) |enc| {
-        const resolved = resolve_fn(enc) catch enc;
+    // For non-Type0 fonts, check standard Encoding
+    if (!is_type0) {
+        if (font_dict.get("Encoding")) |enc| {
+            const resolved = resolve_fn(enc) catch enc;
 
-        switch (resolved) {
-            .name => |name| {
-                applyNamedEncoding(&encoding, name);
-            },
-            .dict => |dict| {
-                // Encoding dictionary with /BaseEncoding and /Differences
-                if (dict.getName("BaseEncoding")) |base| {
-                    applyNamedEncoding(&encoding, base);
-                }
+            switch (resolved) {
+                .name => |name| {
+                    applyNamedEncoding(&encoding, name);
+                },
+                .dict => |dict| {
+                    // Encoding dictionary with /BaseEncoding and /Differences
+                    if (dict.getName("BaseEncoding")) |base| {
+                        applyNamedEncoding(&encoding, base);
+                    }
 
-                if (dict.getArray("Differences")) |diffs| {
-                    try applyDifferences(&encoding, diffs);
-                }
-            },
-            else => {},
+                    if (dict.getArray("Differences")) |diffs| {
+                        try applyDifferences(&encoding, diffs);
+                    }
+                },
+                else => {},
+            }
         }
-    }
 
-    // Check if CID font
-    const subtype = font_dict.getName("Subtype");
-    if (subtype) |st| {
-        if (std.mem.eql(u8, st, "Type0") or
-            std.mem.eql(u8, st, "CIDFontType0") or
-            std.mem.eql(u8, st, "CIDFontType2"))
-        {
-            encoding.is_cid = true;
-            encoding.bytes_per_char = 2;
+        // Check if it's a CID font type directly (rare without Type0 wrapper)
+        if (subtype) |st| {
+            if (std.mem.eql(u8, st, "CIDFontType0") or
+                std.mem.eql(u8, st, "CIDFontType2"))
+            {
+                encoding.is_cid = true;
+                encoding.bytes_per_char = 2;
+            }
         }
     }
 
     return encoding;
+}
+
+/// Apply predefined CMap encoding for CID fonts
+fn applyPredefinedCMap(encoding: *FontEncoding, name: []const u8) void {
+    // Identity CMaps - CID = Unicode (common for CJK fonts with ToUnicode)
+    if (std.mem.eql(u8, name, "Identity-H") or std.mem.eql(u8, name, "Identity-V")) {
+        // Identity mapping: the character codes are CIDs
+        // Actual Unicode comes from ToUnicode CMap
+        encoding.bytes_per_char = 2;
+        return;
+    }
+
+    // Horizontal variants (commonly used)
+    if (std.mem.eql(u8, name, "UniGB-UCS2-H") or
+        std.mem.eql(u8, name, "UniCNS-UCS2-H") or
+        std.mem.eql(u8, name, "UniJIS-UCS2-H") or
+        std.mem.eql(u8, name, "UniKS-UCS2-H"))
+    {
+        // These map CID directly to Unicode - identity-like
+        encoding.bytes_per_char = 2;
+        return;
+    }
+
+    // UTF-16 variants
+    if (std.mem.eql(u8, name, "UniGB-UTF16-H") or
+        std.mem.eql(u8, name, "UniCNS-UTF16-H") or
+        std.mem.eql(u8, name, "UniJIS-UTF16-H") or
+        std.mem.eql(u8, name, "UniKS-UTF16-H"))
+    {
+        encoding.bytes_per_char = 2;
+        return;
+    }
+
+    // Default for unknown predefined CMaps - assume 2-byte
+    encoding.bytes_per_char = 2;
 }
 
 fn applyNamedEncoding(encoding: *FontEncoding, name: []const u8) void {
@@ -710,10 +827,10 @@ test "WinAnsi decode ASCII" {
     var enc = FontEncoding.init(std.testing.allocator);
     defer enc.deinit();
 
-    var output = std.ArrayList(u8).init(std.testing.allocator);
-    defer output.deinit();
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(std.testing.allocator);
 
-    try enc.decode("Hello", output.writer());
+    try enc.decode("Hello", output.writer(std.testing.allocator));
     try std.testing.expectEqualStrings("Hello", output.items);
 }
 
@@ -721,11 +838,11 @@ test "WinAnsi decode extended" {
     var enc = FontEncoding.init(std.testing.allocator);
     defer enc.deinit();
 
-    var output = std.ArrayList(u8).init(std.testing.allocator);
-    defer output.deinit();
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(std.testing.allocator);
 
     // 0x93 = left double quote, 0x94 = right double quote
-    try enc.decode(&[_]u8{ 0x93, 'H', 'i', 0x94 }, output.writer());
+    try enc.decode(&[_]u8{ 0x93, 'H', 'i', 0x94 }, output.writer(std.testing.allocator));
 
     // Should be "Hi" with smart quotes
     try std.testing.expectEqualStrings("\xe2\x80\x9cHi\xe2\x80\x9d", output.items);
@@ -736,4 +853,77 @@ test "glyph name to unicode" {
     try std.testing.expectEqual(@as(u21, 0x2022), glyphNameToUnicode("bullet"));
     try std.testing.expectEqual(@as(u21, 0xFB01), glyphNameToUnicode("fi"));
     try std.testing.expectEqual(@as(u21, 0x0041), glyphNameToUnicode("uni0041"));
+}
+
+test "CID font decode UTF-16BE" {
+    var enc = FontEncoding.init(std.testing.allocator);
+    defer enc.deinit();
+
+    enc.is_cid = true;
+    enc.bytes_per_char = 2;
+
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(std.testing.allocator);
+
+    // UTF-16BE for "A" (0x0041)
+    try enc.decode(&[_]u8{ 0x00, 0x41 }, output.writer(std.testing.allocator));
+    try std.testing.expectEqualStrings("A", output.items);
+}
+
+test "CID font decode CJK character" {
+    var enc = FontEncoding.init(std.testing.allocator);
+    defer enc.deinit();
+
+    enc.is_cid = true;
+    enc.bytes_per_char = 2;
+
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(std.testing.allocator);
+
+    // UTF-16BE for Chinese character "中" (U+4E2D)
+    try enc.decode(&[_]u8{ 0x4E, 0x2D }, output.writer(std.testing.allocator));
+    // Should output UTF-8 encoding of U+4E2D = 0xE4 0xB8 0xAD
+    try std.testing.expectEqualStrings("中", output.items);
+}
+
+test "CID font with CMap ranges" {
+    var enc = FontEncoding.init(std.testing.allocator);
+
+    // Add a CMap range mapping 0x0001-0x0003 to 'A'-'C'
+    const ranges = try std.testing.allocator.alloc(FontEncoding.CMapRange, 1);
+    ranges[0] = .{
+        .src_start = 0x0001,
+        .src_end = 0x0003,
+        .dst_start = 'A',
+        .is_range = true,
+    };
+    enc.cmap_ranges = ranges;
+    enc.is_cid = true;
+    enc.bytes_per_char = 2;
+
+    defer enc.deinit();
+
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(std.testing.allocator);
+
+    // Character code 0x0002 should map to 'B'
+    try enc.decode(&[_]u8{ 0x00, 0x02 }, output.writer(std.testing.allocator));
+    try std.testing.expectEqualStrings("B", output.items);
+}
+
+test "CID font decode surrogate pairs" {
+    var enc = FontEncoding.init(std.testing.allocator);
+    defer enc.deinit();
+
+    enc.is_cid = true;
+    enc.bytes_per_char = 2;
+
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(std.testing.allocator);
+
+    // UTF-16BE surrogate pair for U+1F600 (😀)
+    // High surrogate: 0xD83D, Low surrogate: 0xDE00
+    try enc.decode(&[_]u8{ 0xD8, 0x3D, 0xDE, 0x00 }, output.writer(std.testing.allocator));
+    // Should output UTF-8 encoding of U+1F600 = 0xF0 0x9F 0x98 0x80
+    try std.testing.expectEqualStrings("😀", output.items);
 }

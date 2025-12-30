@@ -102,12 +102,26 @@ pub fn parseXRef(hash_allocator: std.mem.Allocator, parse_allocator: std.mem.All
 }
 
 /// Find "startxref" near end of file and parse the offset
+/// For incremental updates, we need the LAST startxref (the most recent one)
 fn findStartXref(data: []const u8) ?u64 {
     // PDF spec says startxref should be in last 1024 bytes
     const search_start = if (data.len > 1024) data.len - 1024 else 0;
     const search_region = data[search_start..];
 
-    const startxref_pos = simd.findSubstring(search_region, "startxref") orelse return null;
+    // Find the LAST occurrence of "startxref" for incremental updates
+    var last_pos: ?usize = null;
+    var search_pos: usize = 0;
+
+    while (search_pos < search_region.len) {
+        if (simd.findSubstring(search_region[search_pos..], "startxref")) |rel_pos| {
+            last_pos = search_pos + rel_pos;
+            search_pos = last_pos.? + 9; // Continue searching after this occurrence
+        } else {
+            break;
+        }
+    }
+
+    const startxref_pos = last_pos orelse return null;
     var pos = startxref_pos + 9; // len("startxref")
 
     // Skip whitespace
@@ -416,16 +430,20 @@ test "parse simple xref table" {
         \\endobj
         \\xref
         \\0 2
-        \\0000000000 65535 f 
-        \\0000000009 00000 n 
+        \\0000000000 65535 f
+        \\0000000009 00000 n
         \\trailer
         \\<< /Size 2 /Root 1 0 R >>
         \\startxref
-        \\55
+        \\45
         \\%%EOF
     ;
 
-    var xref = try parseXRef(std.testing.allocator, std.testing.allocator, pdf_data);
+    // Use arena for parsed objects (like real usage)
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var xref = try parseXRef(std.testing.allocator, arena.allocator(), pdf_data);
     defer xref.deinit();
 
     // Should have 2 entries
