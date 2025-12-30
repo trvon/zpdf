@@ -23,6 +23,7 @@ Text extraction performance vs MuPDF 1.26 (`mutool convert -F text`):
 | [Adobe Acrobat Reference](https://helpx.adobe.com/pdf/acrobat_reference.pdf) | 651 | 123 ms | 511 ms | **4.2x** |
 | [Pandas Documentation](https://pandas.pydata.org/pandas-docs/version/1.4/pandas.pdf) | 3,743 | 402 ms | 1,107 ms | **2.8x** |
 | Adobe 10x (merged) | 6,510 | 730 ms | 2,950 ms | **4.0x** |
+| Pandas 10x (merged) | 37,430 | 2,253 ms | 11,096 ms | **4.9x** |
 
 ### Parallel (multi-threaded)
 
@@ -31,8 +32,9 @@ Text extraction performance vs MuPDF 1.26 (`mutool convert -F text`):
 | Adobe Acrobat Reference | 651 | 57 ms | 482 ms | **8.4x** |
 | Pandas Documentation | 3,743 | 215 ms | 1,109 ms | **5.2x** |
 | Adobe 10x (merged) | 6,510 | 127 ms | 2,935 ms | **23x** |
+| Pandas 10x (merged) | 37,430 | 399 ms | 10,936 ms | **27x** |
 
-Peak throughput: **51,142 pages/sec** (Adobe 10x, parallel)
+Peak throughput: **93,847 pages/sec** (Pandas 10x, parallel)
 
 Build with `zig build -Doptimize=ReleaseFast` for these results.
 
