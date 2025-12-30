@@ -94,11 +94,37 @@ zpdf info document.pdf              # Show document info
 zpdf bench document.pdf             # Run benchmark
 ```
 
+### Python
+
+```python
+import zpdf
+
+with zpdf.Document("file.pdf") as doc:
+    print(doc.page_count)
+
+    # Single page
+    text = doc.extract_page(0)
+
+    # All pages (parallel by default)
+    all_text = doc.extract_all()
+
+    # Page info
+    info = doc.get_page_info(0)
+    print(f"{info.width}x{info.height}")
+```
+
+Build the shared library first:
+```bash
+zig build -Doptimize=ReleaseFast
+PYTHONPATH=python python3 examples/basic.py
+```
+
 ## Project Structure
 
 ```
 src/
 ├── root.zig         # Document API and core types
+├── capi.zig         # C ABI exports for FFI
 ├── parser.zig       # PDF object parser
 ├── xref.zig         # XRef table/stream parsing
 ├── pagetree.zig     # Page tree resolution
@@ -107,6 +133,9 @@ src/
 ├── interpreter.zig  # Content stream interpreter
 ├── simd.zig         # SIMD string operations
 └── main.zig         # CLI
+
+python/zpdf/         # Python bindings (cffi)
+examples/            # Usage examples
 ```
 
 ## Status

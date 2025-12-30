@@ -17,6 +17,22 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(lib);
 
+    // Shared library for Python bindings
+    const shared_lib = b.addLibrary(.{
+        .linkage = .dynamic,
+        .name = "zpdf",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/capi.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
+    b.installArtifact(shared_lib);
+
+    const shared_step = b.step("shared", "Build shared library for FFI");
+    shared_step.dependOn(&shared_lib.step);
+
     // CLI tool
     const exe = b.addExecutable(.{
         .name = "zpdf",
