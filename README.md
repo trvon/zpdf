@@ -18,13 +18,15 @@ Text extraction performance on Apple M4 Pro (parallel, stream order):
 
 | Document | Pages | zpdf | pdfium | MuPDF |
 |----------|------:|-----:|-------:|------:|
-| [Intel SDM](https://cdrdv2.intel.com/v1/dl/getContent/671200) | 5,252 | **1,640ms** | 3,632ms | 2,331ms |
-| [C++ Standard](https://open-std.org/jtc1/sc22/wg21/docs/papers/2023/n4950.pdf) | 2,134 | 5,835ms | 1,964ms | **1,079ms** |
-| [Pandas Docs](https://pandas.pydata.org/pandas-docs/version/1.4/pandas.pdf) | 3,743 | 6,656ms | 2,379ms | **1,237ms** |
-| Acrobat Reference | 651 | **958ms** | - | - |
-| US Constitution | 85 | 172ms | 63ms | **58ms** |
+| [Intel SDM](https://cdrdv2.intel.com/v1/dl/getContent/671200) | 5,252 | **227ms** | 3,632ms | 2,331ms |
+| [Pandas Docs](https://pandas.pydata.org/pandas-docs/version/1.4/pandas.pdf) | 3,743 | **762ms** | 2,379ms | 1,237ms |
+| [C++ Standard](https://open-std.org/jtc1/sc22/wg21/docs/papers/2023/n4950.pdf) | 2,134 | **671ms** | 1,964ms | 1,079ms |
+| Acrobat Reference | 651 | **120ms** | - | - |
+| US Constitution | 85 | **24ms** | 63ms | 58ms |
 
-*Lower is better. zpdf uses parallel extraction by default.*
+*Lower is better. Build with `zig build -Doptimize=ReleaseFast`.*
+
+Peak throughput: **23,137 pages/sec** (Intel SDM)
 
 ### Accuracy
 
