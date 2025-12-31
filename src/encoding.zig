@@ -165,6 +165,8 @@ pub const FontEncoding = struct {
     codepoint_map: [256]u21,
     /// ToUnicode CMap ranges (for CID fonts or complex mappings)
     cmap_ranges: []const CMapRange,
+    /// Fast lookup hash map for individual CMap entries (bfchar)
+    cmap_hash: std.AutoHashMapUnmanaged(u32, u32),
     /// Is this a simple 8-bit encoding or complex CID encoding?
     is_cid: bool,
     /// Bytes per character (1 for simple, 1-4 for CID)
@@ -188,13 +190,14 @@ pub const FontEncoding = struct {
         src_start: u32,
         src_end: u32,
         dst_start: u32,
-        is_range: bool, // false = individual mapping
+        is_range: bool, // true = range mapping (bfrange)
     };
 
     pub fn init(allocator: std.mem.Allocator) FontEncoding {
         var enc = FontEncoding{
             .codepoint_map = undefined,
             .cmap_ranges = &.{},
+            .cmap_hash = .{},
             .is_cid = false,
             .bytes_per_char = 1,
             .metrics = .{},
@@ -214,6 +217,7 @@ pub const FontEncoding = struct {
         if (self.cmap_ranges.len > 0) {
             self.allocator.free(self.cmap_ranges);
         }
+        self.cmap_hash.deinit(self.allocator);
         self.widths.deinit();
         // Free CIDToGIDMap stream data if present
         switch (self.cid_to_gid_map.mapping) {
@@ -340,6 +344,7 @@ pub const FontEncoding = struct {
     }
 
     fn codeInRanges(self: *const FontEncoding, code: u32) bool {
+        if (self.cmap_hash.contains(code)) return true;
         for (self.cmap_ranges) |range| {
             if (code >= range.src_start and code <= range.src_end) {
                 return true;
@@ -349,13 +354,14 @@ pub const FontEncoding = struct {
     }
 
     fn lookupCMap(self: *const FontEncoding, code: u32) ?u32 {
+        // Fast O(1) lookup in hash map first (for bfchar entries)
+        if (self.cmap_hash.get(code)) |dst| {
+            return dst;
+        }
+        // Fall back to range search (for bfrange entries)
         for (self.cmap_ranges) |range| {
-            if (code >= range.src_start and code <= range.src_end) {
-                if (range.is_range) {
-                    return range.dst_start + (code - range.src_start);
-                } else {
-                    return range.dst_start;
-                }
+            if (range.is_range and code >= range.src_start and code <= range.src_end) {
+                return range.dst_start + (code - range.src_start);
             }
         }
         return null;
@@ -385,10 +391,7 @@ pub fn parseFontEncoding(
             const resolved = resolve_fn(resolve_ctx, enc_obj);
             switch (resolved) {
                 .name => |name| applyPredefinedCMap(&encoding, name),
-                .stream => |stream| {
-                    // Embedded CMap stream - parse it
-                    try parseToUnicodeCMap(allocator, stream, &encoding);
-                },
+                .stream => |stream| try parseToUnicodeCMap(allocator, stream, &encoding),
                 else => {},
             }
         }
@@ -413,7 +416,7 @@ pub fn parseFontEncoding(
                     }
 
                     // Check for ToUnicode in CIDFont (rare but possible)
-                    if (encoding.cmap_ranges.len == 0) {
+                    if (encoding.cmap_ranges.len == 0 and encoding.cmap_hash.count() == 0) {
                         if (cid_font.get("ToUnicode")) |tounicode| {
                             const tu_resolved = resolve_fn(resolve_ctx, tounicode);
                             if (tu_resolved == .stream) {
@@ -825,19 +828,19 @@ pub fn parseToUnicodeCMap(allocator: std.mem.Allocator, stream: Object.Stream, e
             try parseBfChar(allocator, data, &pos, &ranges, encoding);
         } else if (matchAt(data, pos, "beginbfrange")) {
             pos += 12;
-            try parseBfRange(allocator, data, &pos, &ranges);
+            try parseBfRange(allocator, data, &pos, &ranges, encoding);
         } else {
             pos += 1;
         }
     }
 
     encoding.cmap_ranges = try ranges.toOwnedSlice(allocator);
-    if (encoding.cmap_ranges.len > 0) {
+    if (encoding.cmap_ranges.len > 0 or encoding.cmap_hash.count() > 0) {
         encoding.is_cid = true;
     }
 }
 
-fn parseBfChar(allocator: std.mem.Allocator, data: []const u8, pos: *usize, ranges: *std.ArrayList(FontEncoding.CMapRange), encoding: *FontEncoding) !void {
+fn parseBfChar(allocator: std.mem.Allocator, data: []const u8, pos: *usize, _: *std.ArrayList(FontEncoding.CMapRange), encoding: *FontEncoding) !void {
     while (pos.* < data.len) {
         skipWhitespace(data, pos);
 
@@ -847,28 +850,30 @@ fn parseBfChar(allocator: std.mem.Allocator, data: []const u8, pos: *usize, rang
         }
 
         // Parse source code: <XXXX>
-        const src = parseHexToken(data, pos) orelse continue;
+        const src = parseHexToken(data, pos) orelse {
+            skipToNextEntry(data, pos);
+            continue;
+        };
 
         skipWhitespace(data, pos);
 
         // Parse destination: <XXXX> (Unicode)
-        const dst = parseHexToken(data, pos) orelse continue;
+        const dst = parseHexToken(data, pos) orelse {
+            skipToNextEntry(data, pos);
+            continue;
+        };
 
         // For simple 1-byte codes, update the direct map
         if (src <= 255 and dst <= 0x10FFFF) {
             encoding.codepoint_map[@intCast(src)] = @intCast(dst);
         }
 
-        try ranges.append(allocator, .{
-            .src_start = src,
-            .src_end = src,
-            .dst_start = dst,
-            .is_range = false,
-        });
+        // Add to hash map for O(1) lookup
+        try encoding.cmap_hash.put(allocator, src, dst);
     }
 }
 
-fn parseBfRange(allocator: std.mem.Allocator, data: []const u8, pos: *usize, ranges: *std.ArrayList(FontEncoding.CMapRange)) !void {
+fn parseBfRange(allocator: std.mem.Allocator, data: []const u8, pos: *usize, ranges: *std.ArrayList(FontEncoding.CMapRange), encoding: *FontEncoding) !void {
     while (pos.* < data.len) {
         skipWhitespace(data, pos);
 
@@ -877,15 +882,25 @@ fn parseBfRange(allocator: std.mem.Allocator, data: []const u8, pos: *usize, ran
             return;
         }
 
-        // Parse: <start> <end> <dst_start>
-        const src_start = parseHexToken(data, pos) orelse continue;
+        // Parse: <start> <end> <dst_start> or <start> <end> [array]
+        const src_start = parseHexToken(data, pos) orelse {
+            // Can't parse - skip to next line or next '<'
+            skipToNextEntry(data, pos);
+            continue;
+        };
         skipWhitespace(data, pos);
-        const src_end = parseHexToken(data, pos) orelse continue;
+        const src_end = parseHexToken(data, pos) orelse {
+            skipToNextEntry(data, pos);
+            continue;
+        };
         skipWhitespace(data, pos);
 
         // Destination can be a hex value or an array
         if (pos.* < data.len and data[pos.*] == '<') {
-            const dst_start = parseHexToken(data, pos) orelse continue;
+            const dst_start = parseHexToken(data, pos) orelse {
+                skipToNextEntry(data, pos);
+                continue;
+            };
             try ranges.append(allocator, .{
                 .src_start = src_start,
                 .src_end = src_end,
@@ -893,24 +908,23 @@ fn parseBfRange(allocator: std.mem.Allocator, data: []const u8, pos: *usize, ran
                 .is_range = true,
             });
         } else if (pos.* < data.len and data[pos.*] == '[') {
-            // Array of mappings
+            // Array of mappings - add to hash map for O(1) lookup
             pos.* += 1;
             var src = src_start;
             while (src <= src_end and pos.* < data.len) {
                 skipWhitespace(data, pos);
-                if (data[pos.*] == ']') {
+                if (pos.* < data.len and data[pos.*] == ']') {
                     pos.* += 1;
                     break;
                 }
                 const dst = parseHexToken(data, pos) orelse break;
-                try ranges.append(allocator, .{
-                    .src_start = src,
-                    .src_end = src,
-                    .dst_start = dst,
-                    .is_range = false,
-                });
+                // Add to hash map instead of ranges
+                try encoding.cmap_hash.put(allocator, src, dst);
                 src += 1;
             }
+        } else {
+            // Unknown format - skip to next entry
+            skipToNextEntry(data, pos);
         }
     }
 }
@@ -946,6 +960,18 @@ fn parseHexToken(data: []const u8, pos: *usize) ?u32 {
 
 fn skipWhitespace(data: []const u8, pos: *usize) void {
     while (pos.* < data.len and isWhitespace(data[pos.*])) {
+        pos.* += 1;
+    }
+}
+
+/// Skip to next valid entry (newline or '<') when parsing fails
+fn skipToNextEntry(data: []const u8, pos: *usize) void {
+    while (pos.* < data.len) {
+        const c = data[pos.*];
+        // Stop at newline or start of hex token
+        if (c == '\n' or c == '\r' or c == '<') return;
+        // Also stop if we hit "end" keyword
+        if (matchAt(data, pos.*, "end")) return;
         pos.* += 1;
     }
 }

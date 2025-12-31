@@ -250,7 +250,7 @@ fn ensurePageFonts(self: *Document, page_idx: usize) void {
     if (page.resources == null) return;
     const resources = page.resources.?;
     const fonts_dict_obj = resources.get("Font") orelse return;
-    
+
     const fonts_dict_resolved = switch (fonts_dict_obj) {
         .reference => |ref| pagetree.resolveRef(arena, self.data, &self.xref_table, ref, &self.object_cache) catch null,
         else => fonts_dict_obj,
@@ -306,10 +306,7 @@ fn ensurePageFonts(self: *Document, page_idx: usize) void {
                 const r: *const Resolver = @alignCast(@ptrCast(ctx));
                 return r.resolve(obj);
             }
-        }.wrapper, &resolver) catch {
-            // Font parsing failed - skip this font
-            continue;
-        };
+        }.wrapper, &resolver) catch continue;
 
         // Need to dupe key since bufPrint uses stack buffer
         const owned_key = arena.dupe(u8, key) catch continue;
