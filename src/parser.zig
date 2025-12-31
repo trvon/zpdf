@@ -751,3 +751,129 @@ test "parse complex object" {
     const mediabox = obj.dict.getArray("MediaBox").?;
     try std.testing.expectEqual(@as(usize, 4), mediabox.len);
 }
+
+test "parse stream object" {
+    const input =
+        \\<< /Length 12 >>
+        \\stream
+        \\Hello World!
+        \\endstream
+    ;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var parser = Parser.init(arena.allocator(), input);
+    const obj = try parser.parseObject();
+
+    try std.testing.expect(obj == .stream);
+    try std.testing.expectEqual(@as(usize, 12), obj.stream.data.len);
+}
+
+test "parse empty array" {
+    const input = "[]";
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var parser = Parser.init(arena.allocator(), input);
+    const obj = try parser.parseObject();
+
+    try std.testing.expect(obj == .array);
+    try std.testing.expectEqual(@as(usize, 0), obj.array.len);
+}
+
+test "parse empty dictionary" {
+    const input = "<<>>";
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var parser = Parser.init(arena.allocator(), input);
+    const obj = try parser.parseObject();
+
+    try std.testing.expect(obj == .dict);
+    try std.testing.expectEqual(@as(usize, 0), obj.dict.entries.len);
+}
+
+test "parse escaped string characters" {
+    const input = "(Hello\\nWorld\\t\\r\\\\)";
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var parser = Parser.init(arena.allocator(), input);
+    const obj = try parser.parseObject();
+
+    try std.testing.expect(obj == .string);
+    try std.testing.expectEqualStrings("Hello\nWorld\t\r\\", obj.string);
+}
+
+test "parse octal escape in string" {
+    const input = "(\\101\\102\\103)"; // ABC in octal
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var parser = Parser.init(arena.allocator(), input);
+    const obj = try parser.parseObject();
+
+    try std.testing.expect(obj == .string);
+    try std.testing.expectEqualStrings("ABC", obj.string);
+}
+
+test "parse name with special characters" {
+    const input = "/Font#20Name"; // #20 is space
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var parser = Parser.init(arena.allocator(), input);
+    const obj = try parser.parseObject();
+
+    try std.testing.expect(obj == .name);
+    try std.testing.expectEqualStrings("Font Name", obj.name);
+}
+
+test "parse real number variations" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // Leading decimal
+    var p1 = Parser.init(arena.allocator(), ".5");
+    const obj1 = try p1.parseObject();
+    try std.testing.expectApproxEqAbs(@as(f64, 0.5), obj1.real, 0.001);
+
+    // Trailing decimal
+    var p2 = Parser.init(arena.allocator(), "5.");
+    const obj2 = try p2.parseObject();
+    try std.testing.expectApproxEqAbs(@as(f64, 5.0), obj2.real, 0.001);
+
+    // Negative with decimal
+    var p3 = Parser.init(arena.allocator(), "-.5");
+    const obj3 = try p3.parseObject();
+    try std.testing.expectApproxEqAbs(@as(f64, -0.5), obj3.real, 0.001);
+}
+
+test "Dict helper methods" {
+    const input = "<< /Name /Value /Num 42 /Arr [1 2 3] /Sub << /Key /Val >> >>";
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var parser = Parser.init(arena.allocator(), input);
+    const obj = try parser.parseObject();
+    const dict = obj.dict;
+
+    try std.testing.expectEqualStrings("Value", dict.getName("Name").?);
+    try std.testing.expect(dict.getName("Missing") == null);
+
+    try std.testing.expectEqual(@as(f64, 42), dict.getNumber("Num").?);
+    try std.testing.expect(dict.getNumber("Missing") == null);
+
+    try std.testing.expectEqual(@as(usize, 3), dict.getArray("Arr").?.len);
+    try std.testing.expect(dict.getArray("Missing") == null);
+
+    try std.testing.expect(dict.getDict("Sub") != null);
+    try std.testing.expect(dict.getDict("Missing") == null);
+}

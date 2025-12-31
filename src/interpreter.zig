@@ -842,3 +842,121 @@ test "lexer TJ array" {
     const op = (try lexer.next()).?;
     try std.testing.expectEqualStrings("TJ", op.operator);
 }
+
+test "lexer hex string decoding" {
+    const content = "<48656C6C6F> Tj"; // "Hello" in hex
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var lexer = ContentLexer.init(arena.allocator(), content);
+
+    const hex = (try lexer.next()).?;
+    try std.testing.expect(hex == .hex_string);
+    try std.testing.expectEqualStrings("Hello", hex.hex_string);
+}
+
+test "lexer hex string with whitespace" {
+    const content = "<48 65 6C 6C 6F> Tj"; // "Hello" with spaces
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var lexer = ContentLexer.init(arena.allocator(), content);
+
+    const hex = (try lexer.next()).?;
+    try std.testing.expect(hex == .hex_string);
+    try std.testing.expectEqualStrings("Hello", hex.hex_string);
+}
+
+test "lexer hex string odd digits" {
+    const content = "<4F3> Tj"; // Odd number of hex digits, should pad with 0
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var lexer = ContentLexer.init(arena.allocator(), content);
+
+    const hex = (try lexer.next()).?;
+    try std.testing.expect(hex == .hex_string);
+    // "4F" = 'O', "30" = '0' (padded)
+    try std.testing.expectEqual(@as(u8, 'O'), hex.hex_string[0]);
+    try std.testing.expectEqual(@as(u8, 0x30), hex.hex_string[1]);
+}
+
+test "lexer hex string CID codes" {
+    const content = "<01F9020101FC> Tj"; // CID font codes
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var lexer = ContentLexer.init(arena.allocator(), content);
+
+    const hex = (try lexer.next()).?;
+    try std.testing.expect(hex == .hex_string);
+    try std.testing.expectEqual(@as(usize, 6), hex.hex_string.len);
+    try std.testing.expectEqual(@as(u8, 0x01), hex.hex_string[0]);
+    try std.testing.expectEqual(@as(u8, 0xF9), hex.hex_string[1]);
+    try std.testing.expectEqual(@as(u8, 0x02), hex.hex_string[2]);
+    try std.testing.expectEqual(@as(u8, 0x01), hex.hex_string[3]);
+}
+
+test "lexer string escape sequences" {
+    const content = "(Hello\\nWorld\\t!) Tj";
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var lexer = ContentLexer.init(arena.allocator(), content);
+
+    const str = (try lexer.next()).?;
+    try std.testing.expect(str == .string);
+    try std.testing.expectEqualStrings("Hello\nWorld\t!", str.string);
+}
+
+test "lexer string octal escape" {
+    const content = "(\\101\\102\\103) Tj"; // ABC in octal
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var lexer = ContentLexer.init(arena.allocator(), content);
+
+    const str = (try lexer.next()).?;
+    try std.testing.expect(str == .string);
+    try std.testing.expectEqualStrings("ABC", str.string);
+}
+
+test "lexer nested parentheses" {
+    const content = "(Hello (nested) World) Tj";
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var lexer = ContentLexer.init(arena.allocator(), content);
+
+    const str = (try lexer.next()).?;
+    try std.testing.expect(str == .string);
+    try std.testing.expectEqualStrings("Hello (nested) World", str.string);
+}
+
+test "lexer negative numbers" {
+    const content = "-100 -3.14 Td";
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var lexer = ContentLexer.init(arena.allocator(), content);
+
+    const n1 = (try lexer.next()).?;
+    try std.testing.expectEqual(@as(f64, -100), n1.number);
+
+    const n2 = (try lexer.next()).?;
+    try std.testing.expectApproxEqAbs(@as(f64, -3.14), n2.number, 0.001);
+}
+
+test "lexer text operators" {
+    const content = "BT Tf Tj TJ T* Td TD Tm ' \" ET";
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var lexer = ContentLexer.init(arena.allocator(), content);
+
+    const ops = [_][]const u8{ "BT", "Tf", "Tj", "TJ", "T*", "Td", "TD", "Tm", "'", "\"", "ET" };
+    for (ops) |expected| {
+        const tok = (try lexer.next()).?;
+        try std.testing.expectEqualStrings(expected, tok.operator);
+    }
+}

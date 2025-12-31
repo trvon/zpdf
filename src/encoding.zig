@@ -1309,3 +1309,95 @@ test "CID font decode surrogate pairs" {
     // Should output UTF-8 encoding of U+1F600 = 0xF0 0x9F 0x98 0x80
     try std.testing.expectEqualStrings("😀", output.items);
 }
+
+test "MacRoman encoding" {
+    var enc = FontEncoding.init(std.testing.allocator);
+    defer enc.deinit();
+
+    // Apply MacRoman encoding
+    applyNamedEncoding(&enc, "MacRomanEncoding");
+
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(std.testing.allocator);
+
+    // 0xCA in MacRoman is a non-breaking space
+    try enc.decode(&[_]u8{0xCA}, output.writer(std.testing.allocator));
+    try std.testing.expectEqual(@as(usize, 2), output.items.len); // UTF-8 NBSP is 2 bytes
+}
+
+test "encoding differences array" {
+    var enc = FontEncoding.init(std.testing.allocator);
+    defer enc.deinit();
+
+    // Simulate a /Differences array that maps code 65 to 'B' instead of 'A'
+    enc.codepoint_map[65] = 'B';
+
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(std.testing.allocator);
+
+    try enc.decode(&[_]u8{65}, output.writer(std.testing.allocator));
+    try std.testing.expectEqualStrings("B", output.items);
+}
+
+test "CID identity mapping" {
+    var enc = FontEncoding.init(std.testing.allocator);
+    defer enc.deinit();
+
+    enc.is_cid = true;
+    enc.bytes_per_char = 2;
+    // No CMap ranges - should use identity mapping (UTF-16BE)
+
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(std.testing.allocator);
+
+    // 0x0041 = 'A' in Unicode
+    try enc.decode(&[_]u8{ 0x00, 0x41 }, output.writer(std.testing.allocator));
+    try std.testing.expectEqualStrings("A", output.items);
+}
+
+test "CMap range mapping" {
+    var enc = FontEncoding.init(std.testing.allocator);
+    defer enc.deinit();
+
+    enc.is_cid = true;
+    enc.bytes_per_char = 2;
+
+    // Add a range: codes 0x0100-0x0102 map to 'X', 'Y', 'Z'
+    var ranges: std.ArrayList(FontEncoding.CMapRange) = .empty;
+    try ranges.append(std.testing.allocator, .{ .src_start = 0x0100, .src_end = 0x0102, .dst_start = 'X', .is_range = true });
+    enc.cmap_ranges = try ranges.toOwnedSlice(std.testing.allocator);
+
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(std.testing.allocator);
+
+    try enc.decode(&[_]u8{ 0x01, 0x00 }, output.writer(std.testing.allocator));
+    try std.testing.expectEqualStrings("X", output.items);
+
+    output.clearRetainingCapacity();
+    try enc.decode(&[_]u8{ 0x01, 0x01 }, output.writer(std.testing.allocator));
+    try std.testing.expectEqualStrings("Y", output.items);
+
+    output.clearRetainingCapacity();
+    try enc.decode(&[_]u8{ 0x01, 0x02 }, output.writer(std.testing.allocator));
+    try std.testing.expectEqualStrings("Z", output.items);
+}
+
+test "glyph widths" {
+    var widths = GlyphWidths.init(std.testing.allocator);
+    defer widths.deinit();
+
+    widths.first_char = 32;
+    widths.last_char = 127;
+    widths.simple_widths[65] = 750; // 'A'
+    widths.simple_widths[32] = 250; // space
+
+    try std.testing.expectEqual(@as(f64, 750), widths.getWidth(65));
+    try std.testing.expectEqual(@as(f64, 250), widths.getWidth(32));
+}
+
+test "font metrics defaults" {
+    const metrics = FontMetrics{};
+    try std.testing.expectEqual(@as(f64, 800), metrics.ascender);
+    try std.testing.expectEqual(@as(f64, -200), metrics.descender);
+    try std.testing.expectEqual(@as(f64, 700), metrics.cap_height);
+}
