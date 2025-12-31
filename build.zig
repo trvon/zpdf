@@ -33,6 +33,25 @@ pub fn build(b: *std.Build) void {
     const shared_step = b.step("shared", "Build shared library for FFI");
     shared_step.dependOn(&shared_lib.step);
 
+    // WebAssembly build
+    const wasm = b.addExecutable(.{
+        .name = "zpdf",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/wapi.zig"),
+            .target = b.resolveTargetQuery(.{
+                .cpu_arch = .wasm32,
+                .os_tag = .freestanding,
+            }),
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    wasm.entry = .disabled;
+    wasm.rdynamic = true;
+
+    const wasm_step = b.step("wasm", "Build WebAssembly module");
+    const install_wasm = b.addInstallArtifact(wasm, .{});
+    wasm_step.dependOn(&install_wasm.step);
+
     // CLI tool
     const exe = b.addExecutable(.{
         .name = "zpdf",

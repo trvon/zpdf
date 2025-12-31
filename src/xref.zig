@@ -79,7 +79,7 @@ pub fn parseXRef(hash_allocator: std.mem.Allocator, parse_allocator: std.mem.All
     while (current_offset) |offset| {
         if (offset >= data.len) return XRefParseError.InvalidXrefOffset;
 
-        const xref_start = data[offset..];
+        const xref_start = data[@intCast(offset)..];
 
         if (std.mem.startsWith(u8, xref_start, "xref")) {
             // Traditional xref table
@@ -146,7 +146,7 @@ fn parseXrefTable(
     offset: u64,
     xref: *XRefTable,
 ) XRefParseError!Object.Dict {
-    var pos = offset;
+    var pos: usize = @intCast(offset);
 
     // Skip "xref" keyword
     if (pos + 4 > data.len or !std.mem.eql(u8, data[pos..][0..4], "xref")) {
@@ -244,7 +244,7 @@ fn parseXrefStream(
     xref: *XRefTable,
 ) XRefParseError!Object.Dict {
     // Parse the stream object
-    var p = parser.Parser.initAt(allocator, data, offset);
+    var p = parser.Parser.initAt(allocator, data, @intCast(offset));
     const indirect = p.parseIndirectObject() catch return XRefParseError.InvalidXrefStream;
 
     const stream = switch (indirect.obj) {

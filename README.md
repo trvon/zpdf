@@ -167,8 +167,8 @@ examples/            # Usage examples
 | Word/line bounding boxes | Yes | Yes |
 | **Font Support** | | |
 | WinAnsi/MacRoman | Yes | Yes |
-| ToUnicode CMap | Yes | Yes |
-| CID fonts (Type0) | Yes | Yes |
+| ToUnicode CMap | Partial* | Yes |
+| CID fonts (Type0) | Partial* | Yes |
 | Embedded fonts | No | Yes |
 | **Compression** | | |
 | FlateDecode, LZW, ASCII85/Hex | Yes | Yes |
@@ -179,9 +179,11 @@ examples/            # Usage examples
 | Forms / Annotations | No | Yes |
 | Rendering | No | Yes |
 
+*\*ToUnicode/CID fonts: Works when CMap is embedded directly. References to compressed object streams not yet supported (affects some Greek, Chinese, Japanese, Korean PDFs).*
+
 **Use zpdf when:** Speed matters, simple layouts, batch processing raw text.
 
-**Use MuPDF when:** Complex layouts, encrypted PDFs, accurate reading order needed.
+**Use MuPDF when:** Complex layouts, encrypted PDFs, non-Latin scripts.
 
 ## License
 

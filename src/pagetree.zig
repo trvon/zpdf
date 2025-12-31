@@ -57,7 +57,7 @@ pub fn resolveRef(
         .in_use => {
             if (entry.offset >= data.len) return Object{ .null = {} };
 
-            var p = parser.Parser.initAt(allocator, data, entry.offset);
+            var p = parser.Parser.initAt(allocator, data, @intCast(entry.offset));
             const indirect = p.parseIndirectObject() catch return Object{ .null = {} };
 
             try resolved_cache.put(ref.num, indirect.obj);
@@ -84,7 +84,7 @@ fn resolveCompressedObject(
     const objstm_entry = xref.get(objstm_num) orelse return Object{ .null = {} };
     if (objstm_entry.entry_type != .in_use) return Object{ .null = {} };
 
-    var p = parser.Parser.initAt(allocator, data, objstm_entry.offset);
+    var p = parser.Parser.initAt(allocator, data, @intCast(objstm_entry.offset));
     const indirect = p.parseIndirectObject() catch return Object{ .null = {} };
 
     const stream = switch (indirect.obj) {

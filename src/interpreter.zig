@@ -644,15 +644,43 @@ pub const ContentLexer = struct {
 
     fn scanHexString(self: *ContentLexer) []const u8 {
         self.pos += 1; // Skip '<'
-        const start = self.pos;
+
+        // Decode hex string to bytes
+        var result: std.ArrayList(u8) = .empty;
+
+        var high_nibble: ?u8 = null;
 
         while (self.pos < self.data.len and self.data[self.pos] != '>') {
+            const c = self.data[self.pos];
             self.pos += 1;
+
+            // Skip whitespace in hex strings
+            if (c == ' ' or c == '\t' or c == '\n' or c == '\r') continue;
+
+            const nibble: u8 = if (c >= '0' and c <= '9')
+                c - '0'
+            else if (c >= 'A' and c <= 'F')
+                c - 'A' + 10
+            else if (c >= 'a' and c <= 'f')
+                c - 'a' + 10
+            else
+                continue;
+
+            if (high_nibble) |high| {
+                result.append(self.allocator, (high << 4) | nibble) catch {};
+                high_nibble = null;
+            } else {
+                high_nibble = nibble;
+            }
         }
 
-        const result = self.data[start..self.pos];
+        // Handle odd number of hex digits (pad with 0)
+        if (high_nibble) |high| {
+            result.append(self.allocator, high << 4) catch {};
+        }
+
         if (self.pos < self.data.len) self.pos += 1; // Skip '>'
-        return result;
+        return result.toOwnedSlice(self.allocator) catch return &.{};
     }
 
     fn scanName(self: *ContentLexer) []const u8 {

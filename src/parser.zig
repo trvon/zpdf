@@ -72,6 +72,24 @@ pub const Object = union(enum) {
                 else => null,
             };
         }
+
+        pub fn getNumber(self: Dict, key: []const u8) ?f64 {
+            const obj = self.get(key) orelse return null;
+            return switch (obj) {
+                .real => |r| r,
+                .integer => |i| @floatFromInt(i),
+                else => null,
+            };
+        }
+
+        pub fn getString(self: Dict, key: []const u8) ?[]const u8 {
+            const obj = self.get(key) orelse return null;
+            return switch (obj) {
+                .string => |s| s,
+                .hex_string => |s| s,
+                else => null,
+            };
+        }
     };
 
     pub const Stream = struct {

@@ -342,7 +342,7 @@ pub const FontEncoding = struct {
 pub fn parseFontEncoding(
     allocator: std.mem.Allocator,
     font_dict: Object.Dict,
-    resolve_fn: anytype,
+    resolve_fn: *const fn (Object) Object,
 ) !FontEncoding {
     var encoding = FontEncoding.init(allocator);
 
@@ -357,12 +357,12 @@ pub fn parseFontEncoding(
 
         // Parse CMap encoding for Type0 fonts
         if (font_dict.get("Encoding")) |enc_obj| {
-            const resolved = resolve_fn(enc_obj) catch enc_obj;
+            const resolved = resolve_fn(enc_obj);
             switch (resolved) {
                 .name => |name| applyPredefinedCMap(&encoding, name),
                 .stream => |stream| {
                     // Embedded CMap stream - parse it
-                    try parseToUnicode(allocator, stream, &encoding);
+                    try parseToUnicodeCMap(allocator, stream, &encoding);
                 },
                 else => {},
             }
@@ -371,7 +371,7 @@ pub fn parseFontEncoding(
         // Get CIDFont from DescendantFonts array
         if (font_dict.getArray("DescendantFonts")) |descendants| {
             if (descendants.len > 0) {
-                const cid_font_obj = resolve_fn(descendants[0]) catch descendants[0];
+                const cid_font_obj = resolve_fn(descendants[0]);
                 if (cid_font_obj == .dict) {
                     const cid_font = cid_font_obj.dict;
 
@@ -390,9 +390,9 @@ pub fn parseFontEncoding(
                     // Check for ToUnicode in CIDFont (rare but possible)
                     if (encoding.cmap_ranges.len == 0) {
                         if (cid_font.get("ToUnicode")) |tounicode| {
-                            const tu_resolved = resolve_fn(tounicode) catch tounicode;
+                            const tu_resolved = resolve_fn(tounicode);
                             if (tu_resolved == .stream) {
-                                try parseToUnicode(allocator, tu_resolved.stream, &encoding);
+                                try parseToUnicodeCMap(allocator, tu_resolved.stream, &encoding);
                             }
                         }
                     }
@@ -403,9 +403,9 @@ pub fn parseFontEncoding(
 
     // Check for ToUnicode CMap (highest priority for all fonts)
     if (font_dict.get("ToUnicode")) |tounicode| {
-        const resolved = resolve_fn(tounicode) catch tounicode;
+        const resolved = resolve_fn(tounicode);
         if (resolved == .stream) {
-            try parseToUnicode(allocator, resolved.stream, &encoding);
+            try parseToUnicodeCMap(allocator, resolved.stream, &encoding);
             return encoding;
         }
     }
@@ -413,7 +413,7 @@ pub fn parseFontEncoding(
     // For non-Type0 fonts, check standard Encoding
     if (!is_type0) {
         if (font_dict.get("Encoding")) |enc| {
-            const resolved = resolve_fn(enc) catch enc;
+            const resolved = resolve_fn(enc);
 
             switch (resolved) {
                 .name => |name| {
@@ -454,7 +454,7 @@ pub fn parseFontEncoding(
     if (is_type0) {
         if (font_dict.getArray("DescendantFonts")) |descendants| {
             if (descendants.len > 0) {
-                const cid_font_obj = resolve_fn(descendants[0]) catch descendants[0];
+                const cid_font_obj = resolve_fn(descendants[0]);
                 if (cid_font_obj == .dict) {
                     try parseCIDWidths(allocator, cid_font_obj.dict, resolve_fn, &encoding);
                     try parseFontDescriptor(cid_font_obj.dict, resolve_fn, &encoding);
@@ -469,7 +469,7 @@ pub fn parseFontEncoding(
 /// Parse FontDescriptor for font metrics
 fn parseFontDescriptor(font_dict: Object.Dict, resolve_fn: anytype, encoding: *FontEncoding) !void {
     const fd_obj = font_dict.get("FontDescriptor") orelse return;
-    const resolved = resolve_fn(fd_obj) catch return;
+    const resolved = resolve_fn(fd_obj);
     if (resolved != .dict) return;
 
     const fd = resolved.dict;
@@ -537,8 +537,8 @@ fn parseCIDWidths(allocator: std.mem.Allocator, cid_font: Object.Dict, resolve_f
     // Width array /W
     const w_arr = cid_font.getArray("W") orelse return;
 
-    var cid_widths = std.ArrayList(GlyphWidths.CIDWidthEntry).init(allocator);
-    errdefer cid_widths.deinit();
+    var cid_widths: std.ArrayList(GlyphWidths.CIDWidthEntry) = .empty;
+    errdefer cid_widths.deinit(allocator);
 
     var i: usize = 0;
     while (i < w_arr.len) {
@@ -600,7 +600,7 @@ fn parseCIDWidths(allocator: std.mem.Allocator, cid_font: Object.Dict, resolve_f
 /// Parse CIDSystemInfo from CIDFont dictionary
 fn parseCIDSystemInfo(cid_font: Object.Dict, resolve_fn: anytype, encoding: *FontEncoding) void {
     const csi_obj = cid_font.get("CIDSystemInfo") orelse return;
-    const resolved = resolve_fn(csi_obj) catch return;
+    const resolved = resolve_fn(csi_obj);
     if (resolved != .dict) return;
 
     const csi = resolved.dict;
@@ -619,7 +619,7 @@ fn parseCIDSystemInfo(cid_font: Object.Dict, resolve_fn: anytype, encoding: *Fon
 /// Parse CIDToGIDMap from CIDFont dictionary
 fn parseCIDToGIDMap(allocator: std.mem.Allocator, cid_font: Object.Dict, resolve_fn: anytype, encoding: *FontEncoding) !void {
     const map_obj = cid_font.get("CIDToGIDMap") orelse return;
-    const resolved = resolve_fn(map_obj) catch return;
+    const resolved = resolve_fn(map_obj);
 
     switch (resolved) {
         .name => |name| {
@@ -735,7 +735,7 @@ fn applyDifferences(encoding: *FontEncoding, diffs: []Object) !void {
 }
 
 /// Parse ToUnicode CMap stream
-fn parseToUnicode(allocator: std.mem.Allocator, stream: Object.Stream, encoding: *FontEncoding) !void {
+pub fn parseToUnicodeCMap(allocator: std.mem.Allocator, stream: Object.Stream, encoding: *FontEncoding) !void {
     // Decompress stream
     const data = decompress.decompressStream(
         allocator,
@@ -745,8 +745,8 @@ fn parseToUnicode(allocator: std.mem.Allocator, stream: Object.Stream, encoding:
     ) catch return;
     defer allocator.free(data);
 
-    var ranges = std.ArrayList(FontEncoding.CMapRange).init(allocator);
-    errdefer ranges.deinit();
+    var ranges: std.ArrayList(FontEncoding.CMapRange) = .empty;
+    errdefer ranges.deinit(allocator);
 
     var pos: usize = 0;
 
@@ -765,22 +765,22 @@ fn parseToUnicode(allocator: std.mem.Allocator, stream: Object.Stream, encoding:
         // Look for "beginbfchar" or "beginbfrange"
         if (matchAt(data, pos, "beginbfchar")) {
             pos += 11;
-            try parseBfChar(data, &pos, &ranges, encoding);
+            try parseBfChar(allocator, data, &pos, &ranges, encoding);
         } else if (matchAt(data, pos, "beginbfrange")) {
             pos += 12;
-            try parseBfRange(data, &pos, &ranges);
+            try parseBfRange(allocator, data, &pos, &ranges);
         } else {
             pos += 1;
         }
     }
 
-    encoding.cmap_ranges = try ranges.toOwnedSlice();
-    if (ranges.items.len > 0) {
+    encoding.cmap_ranges = try ranges.toOwnedSlice(allocator);
+    if (encoding.cmap_ranges.len > 0) {
         encoding.is_cid = true;
     }
 }
 
-fn parseBfChar(data: []const u8, pos: *usize, ranges: *std.ArrayList(FontEncoding.CMapRange), encoding: *FontEncoding) !void {
+fn parseBfChar(allocator: std.mem.Allocator, data: []const u8, pos: *usize, ranges: *std.ArrayList(FontEncoding.CMapRange), encoding: *FontEncoding) !void {
     while (pos.* < data.len) {
         skipWhitespace(data, pos);
 
@@ -802,7 +802,7 @@ fn parseBfChar(data: []const u8, pos: *usize, ranges: *std.ArrayList(FontEncodin
             encoding.codepoint_map[@intCast(src)] = @intCast(dst);
         }
 
-        try ranges.append(.{
+        try ranges.append(allocator, .{
             .src_start = src,
             .src_end = src,
             .dst_start = dst,
@@ -811,7 +811,7 @@ fn parseBfChar(data: []const u8, pos: *usize, ranges: *std.ArrayList(FontEncodin
     }
 }
 
-fn parseBfRange(data: []const u8, pos: *usize, ranges: *std.ArrayList(FontEncoding.CMapRange)) !void {
+fn parseBfRange(allocator: std.mem.Allocator, data: []const u8, pos: *usize, ranges: *std.ArrayList(FontEncoding.CMapRange)) !void {
     while (pos.* < data.len) {
         skipWhitespace(data, pos);
 
@@ -829,7 +829,7 @@ fn parseBfRange(data: []const u8, pos: *usize, ranges: *std.ArrayList(FontEncodi
         // Destination can be a hex value or an array
         if (pos.* < data.len and data[pos.*] == '<') {
             const dst_start = parseHexToken(data, pos) orelse continue;
-            try ranges.append(.{
+            try ranges.append(allocator, .{
                 .src_start = src_start,
                 .src_end = src_end,
                 .dst_start = dst_start,
@@ -846,7 +846,7 @@ fn parseBfRange(data: []const u8, pos: *usize, ranges: *std.ArrayList(FontEncodi
                     break;
                 }
                 const dst = parseHexToken(data, pos) orelse break;
-                try ranges.append(.{
+                try ranges.append(allocator, .{
                     .src_start = src,
                     .src_end = src,
                     .dst_start = dst,

@@ -10,6 +10,9 @@
 //! 5. Explicit error budgets - caller controls tolerance
 
 const std = @import("std");
+const builtin = @import("builtin");
+
+const is_wasm = builtin.cpu.arch == .wasm32 or builtin.cpu.arch == .wasm64;
 
 // Internal modules
 pub const parser = @import("parser.zig");
@@ -110,13 +113,17 @@ pub const Document = struct {
     /// Accumulated errors
     errors: std.ArrayList(ParseError),
 
-    /// Open a PDF file
+    /// Open a PDF file (not available on WASM)
     pub fn open(allocator: std.mem.Allocator, path: []const u8) !*Document {
         return openWithConfig(allocator, path, ErrorConfig.default());
     }
 
-    /// Open a PDF file with custom error configuration
+    /// Open a PDF file with custom error configuration (not available on WASM)
     pub fn openWithConfig(allocator: std.mem.Allocator, path: []const u8, config: ErrorConfig) !*Document {
+        if (comptime is_wasm) {
+            @compileError("File I/O is not available on WASM. Use openFromMemory instead.");
+        }
+
         const file = try std.fs.cwd().openFile(path, .{});
         defer file.close();
 
@@ -138,6 +145,10 @@ pub const Document = struct {
 
     /// Open from owned memory (will be freed on close)
     fn openFromMemoryOwned(allocator: std.mem.Allocator, data: []align(std.heap.page_size_min) u8, config: ErrorConfig) !*Document {
+        if (comptime is_wasm) {
+            @compileError("openFromMemoryOwned is not available on WASM. Use openFromMemory instead.");
+        }
+
         const doc = try allocator.create(Document);
         errdefer allocator.destroy(doc);
 
@@ -229,7 +240,7 @@ pub const Document = struct {
 
     /// Close the document and free resources
     pub fn close(self: *Document) void {
-        if (self.owns_data) {
+        if (self.owns_data and !is_wasm) {
             const aligned_ptr: [*]align(std.heap.page_size_min) u8 = @alignCast(@ptrCast(@constCast(self.data.ptr)));
             std.posix.munmap(aligned_ptr[0..self.data.len]);
         }
@@ -291,7 +302,7 @@ pub const Document = struct {
         if (content.len == 0) return;
 
         // Simple text extraction using content lexer
-        try extractTextFromContent(arena, content, page.resources, writer);
+        try extractTextFromContent(arena, content, page.resources, self.data, &self.xref_table, &self.object_cache, writer);
     }
 
     /// Extract text from all pages
@@ -388,7 +399,7 @@ pub const Document = struct {
                         &local_cache,
                     ) catch continue;
 
-                    extractTextFromContent(thread_alloc, content, page.resources, fbs.writer()) catch continue;
+                    extractTextFromContent(thread_alloc, content, page.resources, c.doc.data, &c.doc.xref_table, &local_cache, fbs.writer()) catch continue;
 
                     if (fbs.pos > 0) {
                         c.results[page_num] = c.alloc.dupe(u8, buf[0..fbs.pos]) catch &[_]u8{};
@@ -467,15 +478,114 @@ pub const Document = struct {
     };
 };
 
-/// Extract text from content stream (simplified version)
-fn extractTextFromContent(allocator: std.mem.Allocator, content: []const u8, resources: ?Object.Dict, writer: anytype) !void {
-    _ = resources;
+/// Font cache for text extraction
+const FontCache = struct {
+    fonts: std.StringHashMap(encoding.FontEncoding),
+    allocator: std.mem.Allocator,
+    resources: ?Object.Dict,
+    data: []const u8,
+    xref: *xref.XRefTable,
+    cache: *std.AutoHashMap(u32, Object),
 
+    fn init(
+        allocator: std.mem.Allocator,
+        resources: ?Object.Dict,
+        data: []const u8,
+        xref_table: *xref.XRefTable,
+        object_cache: *std.AutoHashMap(u32, Object),
+    ) FontCache {
+        return .{
+            .fonts = std.StringHashMap(encoding.FontEncoding).init(allocator),
+            .allocator = allocator,
+            .resources = resources,
+            .data = data,
+            .xref = xref_table,
+            .cache = object_cache,
+        };
+    }
+
+    fn deinit(self: *FontCache) void {
+        var it = self.fonts.iterator();
+        while (it.next()) |entry| {
+            entry.value_ptr.deinit();
+        }
+        self.fonts.deinit();
+    }
+
+    fn resolveObject(self: *FontCache, obj: Object) Object {
+        return switch (obj) {
+            .reference => |ref| pagetree.resolveRef(self.allocator, self.data, self.xref, ref, self.cache) catch return Object{ .null = {} },
+            else => obj,
+        };
+    }
+
+    fn getFont(self: *FontCache, font_name: []const u8) ?*encoding.FontEncoding {
+        // Check if already loaded
+        if (self.fonts.getPtr(font_name)) |enc| {
+            return enc;
+        }
+
+        // Load font from resources
+        const font_dict = blk: {
+            const res = self.resources orelse break :blk null;
+            const fonts = res.getDict("Font") orelse break :blk null;
+            const font_obj = fonts.get(font_name) orelse break :blk null;
+            // Resolve reference if needed
+            const resolved = self.resolveObject(font_obj);
+            break :blk switch (resolved) {
+                .dict => |d| d,
+                else => null,
+            };
+        };
+
+        if (font_dict) |fd| {
+            // Check if this is a CID font with ToUnicode
+            var enc = encoding.FontEncoding.init(self.allocator);
+
+            // Check for Type0 (CID) font
+            const subtype = fd.getName("Subtype");
+            const is_type0 = subtype != null and std.mem.eql(u8, subtype.?, "Type0");
+
+            if (is_type0) {
+                enc.is_cid = true;
+                enc.bytes_per_char = 2;
+            }
+
+            // Try to parse ToUnicode CMap - only if directly embedded (not a reference)
+            // References to compressed object streams are too slow to resolve on-demand
+            if (fd.get("ToUnicode")) |tounicode| {
+                if (tounicode == .stream) {
+                    encoding.parseToUnicodeCMap(self.allocator, tounicode.stream, &enc) catch {};
+                }
+                // For references, we skip for now - CID fonts will use identity mapping
+            }
+
+            self.fonts.put(font_name, enc) catch return null;
+            return self.fonts.getPtr(font_name);
+        }
+
+        return null;
+    }
+};
+
+/// Extract text from content stream (simplified version)
+fn extractTextFromContent(
+    allocator: std.mem.Allocator,
+    content: []const u8,
+    resources: ?Object.Dict,
+    data: []const u8,
+    xref_table: *xref.XRefTable,
+    object_cache: *std.AutoHashMap(u32, Object),
+    writer: anytype,
+) !void {
     var lexer = interpreter.ContentLexer.init(allocator, content);
     var operands: [64]interpreter.Operand = undefined;
     var operand_count: usize = 0;
 
-    var in_text = false;
+    var font_cache = FontCache.init(allocator, resources, data, xref_table, object_cache);
+    defer font_cache.deinit();
+
+    var current_font: ?*encoding.FontEncoding = null;
     var prev_y: f64 = 0;
     var font_size: f64 = 12;
 
@@ -514,14 +624,14 @@ fn extractTextFromContent(allocator: std.mem.Allocator, content: []const u8, res
             .operator => |op| {
                 // Fast path: switch on first character to minimize string comparisons
                 if (op.len > 0) switch (op[0]) {
-                    'B' => if (op.len == 2 and op[1] == 'T') {
-                        in_text = true;
-                    },
-                    'E' => if (op.len == 2 and op[1] == 'T') {
-                        in_text = false;
-                    },
+                    'B' => if (op.len == 2 and op[1] == 'T') {},
+                    'E' => if (op.len == 2 and op[1] == 'T') {},
                     'T' => if (op.len == 2) switch (op[1]) {
                         'f' => if (operand_count >= 2) {
+                            // Set font: /FontName size Tf
+                            if (operands[0] == .name) {
+                                current_font = font_cache.getFont(operands[0].name);
+                            }
                             font_size = operands[1].number;
                         },
                         'd', 'D' => if (operand_count >= 2) {
@@ -542,26 +652,59 @@ fn extractTextFromContent(allocator: std.mem.Allocator, content: []const u8, res
                             try writer.writeByte('\n');
                         },
                         'j' => if (operand_count >= 1) {
-                            try writeTextOperand(operands[0], writer);
+                            try writeTextWithFont(operands[0], current_font, writer);
                         },
                         'J' => if (operand_count >= 1) {
-                            try writeTJArray(operands[0], writer);
+                            try writeTJArrayWithFont(operands[0], current_font, writer);
                         },
                         else => {},
                     },
                     '\'' => if (operand_count >= 1) {
                         try writer.writeByte('\n');
-                        try writeTextOperand(operands[0], writer);
+                        try writeTextWithFont(operands[0], current_font, writer);
                     },
                     '"' => if (operand_count >= 3) {
                         try writer.writeByte('\n');
-                        try writeTextOperand(operands[2], writer);
+                        try writeTextWithFont(operands[2], current_font, writer);
                     },
                     else => {},
                 };
 
                 operand_count = 0;
             },
+        }
+    }
+}
+
+fn writeTextWithFont(operand: interpreter.Operand, font: ?*encoding.FontEncoding, writer: anytype) !void {
+    const data = switch (operand) {
+        .string => |s| s,
+        .hex_string => |s| s,
+        else => return,
+    };
+
+    if (font) |enc| {
+        try enc.decode(data, writer);
+    } else {
+        try writeTextOperand(operand, writer);
+    }
+}
+
+fn writeTJArrayWithFont(operand: interpreter.Operand, font: ?*encoding.FontEncoding, writer: anytype) !void {
+    const arr = switch (operand) {
+        .array => |a| a,
+        else => return,
+    };
+
+    for (arr) |item| {
+        switch (item) {
+            .string, .hex_string => try writeTextWithFont(item, font, writer),
+            .number => |n| {
+                if (n < -100) {
+                    try writer.writeByte(' ');
+                }
+            },
+            else => {},
         }
     }
 }
