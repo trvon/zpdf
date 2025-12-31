@@ -702,7 +702,7 @@ fn applyPredefinedCMap(encoding: *FontEncoding, name: []const u8) void {
     encoding.bytes_per_char = 2;
 }
 
-fn applyNamedEncoding(encoding: *FontEncoding, name: []const u8) void {
+pub fn applyNamedEncoding(encoding: *FontEncoding, name: []const u8) void {
     if (std.mem.eql(u8, name, "WinAnsiEncoding")) {
         encoding.codepoint_map = win_ansi_encoding;
     } else if (std.mem.eql(u8, name, "MacRomanEncoding")) {
@@ -715,7 +715,7 @@ fn applyNamedEncoding(encoding: *FontEncoding, name: []const u8) void {
     // MacExpertEncoding omitted - rarely used
 }
 
-fn applyDifferences(encoding: *FontEncoding, diffs: []Object) !void {
+pub fn applyDifferences(encoding: *FontEncoding, diffs: []Object) !void {
     var code: u16 = 0;
 
     for (diffs) |item| {

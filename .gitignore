@@ -11,5 +11,8 @@ zig-out/
 # OS files
 .DS_Store
 Thumbs.db
-*.pdf
 __pycache__/
+
+# Test files
+test/
+*.pdf

@@ -280,14 +280,59 @@ pub const Document = struct {
             if (is_type0) {
                 enc.is_cid = true;
                 enc.bytes_per_char = 2;
+            } else {
+                // For simple fonts, apply encoding (WinAnsi, MacRoman, etc.)
+                if (fd.get("Encoding")) |enc_obj| {
+                    switch (enc_obj) {
+                        .name => |name| encoding.applyNamedEncoding(&enc, name),
+                        .reference => |ref| {
+                            // Resolve encoding reference
+                            const resolved = pagetree.resolveRef(arena, self.data, &self.xref_table, ref, &self.object_cache) catch null;
+                            if (resolved) |res| {
+                                switch (res) {
+                                    .name => |name| encoding.applyNamedEncoding(&enc, name),
+                                    .dict => |dict| {
+                                        // Encoding dict with BaseEncoding and/or Differences
+                                        if (dict.getName("BaseEncoding")) |base| {
+                                            encoding.applyNamedEncoding(&enc, base);
+                                        }
+                                        if (dict.getArray("Differences")) |diffs| {
+                                            encoding.applyDifferences(&enc, diffs) catch {};
+                                        }
+                                    },
+                                    else => {},
+                                }
+                            }
+                        },
+                        .dict => |dict| {
+                            // Inline encoding dict
+                            if (dict.getName("BaseEncoding")) |base| {
+                                encoding.applyNamedEncoding(&enc, base);
+                            }
+                            if (dict.getArray("Differences")) |diffs| {
+                                encoding.applyDifferences(&enc, diffs) catch {};
+                            }
+                        },
+                        else => {},
+                    }
+                }
             }
 
-            // Parse ToUnicode CMap (only if embedded, skip slow reference resolution)
+            // Parse ToUnicode CMap (highest priority - overrides other encodings)
             if (fd.get("ToUnicode")) |tounicode| {
-                if (tounicode == .stream) {
-                    encoding.parseToUnicodeCMap(arena, tounicode.stream, &enc) catch {};
+                switch (tounicode) {
+                    .stream => |s| encoding.parseToUnicodeCMap(arena, s, &enc) catch {},
+                    .reference => |ref| {
+                        // Resolve ToUnicode reference
+                        const resolved = pagetree.resolveRef(arena, self.data, &self.xref_table, ref, &self.object_cache) catch null;
+                        if (resolved) |res| {
+                            if (res == .stream) {
+                                encoding.parseToUnicodeCMap(arena, res.stream, &enc) catch {};
+                            }
+                        }
+                    },
+                    else => {},
                 }
-                // TODO: resolve ToUnicode references - needs object stream caching
             }
 
             // Need to dupe key since bufPrint uses stack buffer
