@@ -5,7 +5,7 @@ A PDF text extraction library written in Zig.
 ## Features
 
 - Memory-mapped file reading for efficient large file handling
-- Streaming text extraction (no intermediate allocations)
+- Streaming text extraction with efficient arena allocation
 - Multiple decompression filters: FlateDecode, ASCII85, ASCIIHex, LZW, RunLength
 - Font encoding support: WinAnsi, MacRoman, ToUnicode CMap
 - XRef table and stream parsing (PDF 1.5+)
