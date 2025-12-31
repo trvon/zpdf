@@ -14,57 +14,31 @@ A PDF text extraction library written in Zig.
 
 ## Benchmark
 
-Text extraction performance vs MuPDF 1.26 (`mutool convert -F text`) on Apple M4 Pro:
+Text extraction performance comparison on Apple M4 Pro:
 
-### Sequential
+| Document | Pages | zpdf | pdfium | MuPDF | Tika |
+|----------|------:|-----:|-------:|------:|-----:|
+| [Intel SDM](https://cdrdv2.intel.com/v1/dl/getContent/671200) | 5,252 | **3,132 p/s** | 1,446 p/s | 2,253 p/s | 106 p/s |
+| [Pandas Docs](https://pandas.pydata.org/pandas-docs/version/1.4/pandas.pdf) | 3,743 | 554 p/s | 1,573 p/s | **3,025 p/s** | 70 p/s |
+| [C++ Standard](https://open-std.org/jtc1/sc22/wg21/docs/papers/2023/n4950.pdf) | 2,134 | 359 p/s | 1,087 p/s | **1,978 p/s** | 344 p/s |
+| arXiv Paper | 7 | **555 p/s** | 114 p/s | 249 p/s | 2 p/s |
 
-| Document | Pages | Size | zpdf | MuPDF | Speedup |
-|----------|-------|------|------|-------|---------|
-| [C++ Standard Draft](https://open-std.org/jtc1/sc22/wg21/docs/papers/2023/n4950.pdf) | 2,134 | 8 MB | 250 ms | 968 ms | **3.9x** |
-| [Pandas Documentation](https://pandas.pydata.org/pandas-docs/version/1.4/pandas.pdf) | 3,743 | 15 MB | 395 ms | 1,112 ms | **2.8x** |
-| [Intel SDM](https://cdrdv2.intel.com/v1/dl/getContent/671200) | 5,252 | 25 MB | 451 ms | 2,099 ms | **4.7x** |
-
-### Parallel (default)
-
-| Document | Pages | Size | zpdf | MuPDF | Speedup |
-|----------|-------|------|------|-------|---------|
-| C++ Standard Draft | 2,134 | 8 MB | 131 ms | 966 ms | **7.4x** |
-| Pandas Documentation | 3,743 | 15 MB | 218 ms | 1,117 ms | **5.1x** |
-| Intel SDM | 5,252 | 25 MB | 117 ms | 2,098 ms | **17.9x** |
-
-Peak throughput: **45,000 pages/sec** (Intel SDM, parallel)
-
-Build with `zig build -Doptimize=ReleaseFast` for these results.
-
-### SIMD Acceleration
-
-zpdf uses SIMD-accelerated routines for hot paths:
-- Whitespace skipping (content streams are whitespace-heavy)
-- Delimiter detection (tokenization)
-- Keyword search (`stream`, `endstream`, `startxref`)
-- String boundary scanning
-
-Auto-detects: NEON (ARM64), AVX2/SSE4.2 (x86_64), or scalar fallback.
-
-*Note: MuPDF's threading (`-T` flag) is for rendering/rasterization only. Text extraction via `mutool convert -F text` is single-threaded by design. zpdf parallelizes text extraction across pages.*
+*p/s = pages per second. Higher is better. zpdf uses parallel extraction by default.*
 
 ### Accuracy
 
-Text extraction accuracy vs MuPDF (reference) on US Constitution (85 pages):
+All tools achieve ~99%+ character accuracy vs MuPDF reference:
 
-| Tool | Char Accuracy | WER | Time | vs MuPDF |
-|------|---------------|-----|------|----------|
-| zpdf | 99.6% | 2.1% | 2 ms | **24x faster** |
-| MuPDF | 100% | 0% | 54 ms | 1x |
-| Tika | 97.4% | 10.6% | 1,307 ms | 24x slower |
-| pdftotext | 57.0% | 19.8% | 90 ms | 1.7x slower |
+| Tool | Char Accuracy | WER |
+|------|---------------|-----|
+| zpdf | 99.3-99.9% | 1-8% |
+| pdfium | 99.2-100% | 0-4% |
+| MuPDF | 100% (ref) | 0% |
+| Tika | 97-100% | 0-11% |
 
-- **Char Accuracy**: Sequence similarity vs MuPDF baseline (higher = better)
-- **WER**: Word Error Rate vs MuPDF baseline (lower = better)
+Build with `zig build -Doptimize=ReleaseFast` for best performance.
 
-MuPDF is the accuracy baseline (100%). zpdf is 650x faster than Tika with better accuracy.
-
-Run `PYTHONPATH=python python benchmark/accuracy.py` to reproduce.
+Run `PYTHONPATH=python python benchmark/accuracy.py` to reproduce (requires `pypdfium2`).
 
 ## Requirements
 
@@ -160,34 +134,34 @@ python/zpdf/         # Python bindings (cffi)
 examples/            # Usage examples
 ```
 
-## Comparison with MuPDF
+## Comparison
 
-| Feature | zpdf | MuPDF |
-|---------|------|-------|
-| **Text Extraction** | | |
-| Reading order / layout analysis | Yes | Yes |
-| Two-column detection | Yes | Yes |
-| Paragraph grouping | Yes | Yes |
-| Word/line bounding boxes | Yes | Yes |
-| **Font Support** | | |
-| WinAnsi/MacRoman | Yes | Yes |
-| ToUnicode CMap | Partial* | Yes |
-| CID fonts (Type0) | Partial* | Yes |
-| Embedded fonts | No | Yes |
-| **Compression** | | |
-| FlateDecode, LZW, ASCII85/Hex | Yes | Yes |
-| JBIG2, JPEG2000 | No | Yes |
-| **PDF Features** | | |
-| Incremental updates | Yes | Yes |
-| Encrypted PDFs | No | Yes |
-| Forms / Annotations | No | Yes |
-| Rendering | No | Yes |
+| Feature | zpdf | pdfium | MuPDF |
+|---------|------|--------|-------|
+| **Text Extraction** | | | |
+| Stream order | Yes | Yes | Yes |
+| Reading order | Experimental | No | Yes |
+| Word bounding boxes | Yes | Yes | Yes |
+| **Font Support** | | | |
+| WinAnsi/MacRoman | Yes | Yes | Yes |
+| ToUnicode CMap | Partial* | Yes | Yes |
+| CID fonts (Type0) | Partial* | Yes | Yes |
+| **Compression** | | | |
+| FlateDecode, LZW, ASCII85/Hex | Yes | Yes | Yes |
+| JBIG2, JPEG2000 | No | Yes | Yes |
+| **Other** | | | |
+| Encrypted PDFs | No | Yes | Yes |
+| Rendering | No | Yes | Yes |
+| Multi-threaded | Yes | No** | No |
 
-*\*ToUnicode/CID fonts: Works when CMap is embedded directly. References to compressed object streams not yet supported (affects some Greek, Chinese, Japanese, Korean PDFs).*
+*\*ToUnicode/CID: Works when CMap is embedded directly.*
+*\*\*pdfium requires multi-process for parallelism (forked before thread support).*
 
-**Use zpdf when:** Speed matters, simple layouts, batch processing raw text.
+**Use zpdf when:** Batch processing, simple text extraction, Zig integration.
 
-**Use MuPDF when:** Complex layouts, encrypted PDFs, non-Latin scripts.
+**Use pdfium when:** Browser integration, full PDF support, proven stability.
+
+**Use MuPDF when:** Reading order matters, complex layouts, rendering needed.
 
 ## License
 
