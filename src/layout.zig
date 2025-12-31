@@ -70,17 +70,19 @@ pub const LayoutResult = struct {
         var prev_x1: f64 = self.spans[0].x0;
         var prev_font_size: f64 = self.spans[0].font_size;
 
-        for (self.spans) |span| {
-            if (@abs(span.y0 - prev_y) > line_threshold) {
-                separator_count += 1; // newline
-                prev_y = span.y0;
-                prev_x1 = span.x0;
-            } else {
-                // Use font-relative threshold: 20% of font size indicates word gap
-                const space_threshold = @max(1.0, prev_font_size * 0.2);
-                const gap = span.x0 - prev_x1;
-                if (gap > space_threshold) {
-                    separator_count += 1; // space
+        for (self.spans, 0..) |span, i| {
+            if (i > 0) {
+                if (@abs(span.y0 - prev_y) > line_threshold) {
+                    separator_count += 1; // newline
+                    prev_y = span.y0;
+                } else {
+                    // Detect word gaps using font-relative threshold
+                    // Typical space width is ~25-33% of em, kerning is <10%
+                    const space_width = prev_font_size * 0.15; // 15% of font size
+                    const gap = span.x0 - prev_x1;
+                    if (gap > space_width) {
+                        separator_count += 1; // space
+                    }
                 }
             }
             total_len += span.text.len;
@@ -101,11 +103,10 @@ pub const LayoutResult = struct {
                     result[pos] = '\n';
                     pos += 1;
                     prev_y = span.y0;
-                    prev_x1 = span.x0;
                 } else {
-                    const space_threshold = @max(1.0, prev_font_size * 0.2);
+                    const space_width = prev_font_size * 0.15;
                     const gap = span.x0 - prev_x1;
-                    if (gap > space_threshold) {
+                    if (gap > space_width) {
                         result[pos] = ' ';
                         pos += 1;
                     }
@@ -196,58 +197,22 @@ pub fn analyzeLayout(allocator: std.mem.Allocator, spans: []const TextSpan, page
     var result_spans = try std.ArrayList(TextSpan).initCapacity(allocator, spans.len);
 
     if (is_two_column) {
-        // Two-column layout with possible full-width header
-        var header_spans = try std.ArrayList(TextSpan).initCapacity(allocator, spans.len / 10);
-        defer header_spans.deinit(allocator);
+        // Two-column layout: output left column first, then right column
         var left_spans = try std.ArrayList(TextSpan).initCapacity(allocator, spans.len / 2);
         defer left_spans.deinit(allocator);
         var right_spans = try std.ArrayList(TextSpan).initCapacity(allocator, spans.len / 2);
         defer right_spans.deinit(allocator);
 
-        // Find where two-column content starts (first line with both left and right content)
-        var two_col_start_y: f64 = -999999;
-        var line_y: f64 = sorted[0].y0;
-        var line_has_left = false;
-        var line_has_right = false;
-
         for (sorted) |span| {
-            if (@abs(span.y0 - line_y) > line_threshold) {
-                // Check if previous line had both columns
-                if (line_has_left and line_has_right) {
-                    two_col_start_y = line_y;
-                    break;
-                }
-                line_y = span.y0;
-                line_has_left = false;
-                line_has_right = false;
-            }
             const mid_x = (span.x0 + span.x1) / 2;
-            if (mid_x < half_page - column_margin) {
-                line_has_left = true;
-            } else if (mid_x > half_page + column_margin) {
-                line_has_right = true;
-            }
-        }
-
-        // Classify spans: header (above two-col start) or left/right column
-        for (sorted) |span| {
-            if (span.y0 > two_col_start_y + line_threshold) {
-                // Header content (above two-column region)
-                try header_spans.append(allocator, span);
+            if (mid_x < half_page) {
+                try left_spans.append(allocator, span);
             } else {
-                const mid_x = (span.x0 + span.x1) / 2;
-                if (mid_x < half_page) {
-                    try left_spans.append(allocator, span);
-                } else {
-                    try right_spans.append(allocator, span);
-                }
+                try right_spans.append(allocator, span);
             }
         }
 
-        // Output order: header first, then left column, then right column
-        for (header_spans.items) |span| {
-            try result_spans.append(allocator, span);
-        }
+        // Output: left column first, then right column
         for (left_spans.items) |span| {
             try result_spans.append(allocator, span);
         }
