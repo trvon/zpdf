@@ -11,7 +11,7 @@ A PDF text extraction library written in Zig.
 - XRef table and stream parsing (PDF 1.5+)
 - Configurable error handling (strict or permissive)
 - Structure tree extraction for tagged PDFs (PDF/UA)
-- Geometric sorting fallback for non-tagged PDFs
+- Fast stream order fallback for non-tagged PDFs
 
 ## Benchmark
 
@@ -19,14 +19,14 @@ Text extraction performance on Apple M4 Pro (reading order):
 
 | Document | Pages | zpdf | MuPDF | Speedup |
 |----------|------:|-----:|------:|--------:|
-| [Intel SDM](https://cdrdv2.intel.com/v1/dl/getContent/671200) | 5,252 | **623ms** | 2,132ms | 3.4x |
-| [Pandas Docs](https://pandas.pydata.org/pandas-docs/version/1.4/pandas.pdf) | 3,743 | **1,064ms** | 1,131ms | 1.1x |
-| [C++ Standard](https://open-std.org/jtc1/sc22/wg21/docs/papers/2023/n4950.pdf) | 2,134 | **898ms** | 989ms | 1.1x |
-| [Acrobat Reference](https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/pdfreference1.7old.pdf) | 651 | **199ms** | 510ms | 2.6x |
+| [Intel SDM](https://cdrdv2.intel.com/v1/dl/getContent/671200) | 5,252 | **568ms** | 2,171ms | 3.8x |
+| [Pandas Docs](https://pandas.pydata.org/pandas-docs/version/1.4/pandas.pdf) | 3,743 | **558ms** | 1,147ms | 2.1x |
+| [C++ Standard](https://open-std.org/jtc1/sc22/wg21/docs/papers/2023/n4950.pdf) | 2,134 | **349ms** | 1,001ms | 2.9x |
+| [Acrobat Reference](https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/pdfreference1.7old.pdf) | 651 | **139ms** | 513ms | 3.7x |
 
 *Lower is better. Build with `zig build -Doptimize=ReleaseFast`.*
 
-Peak throughput: **8,426 pages/sec** (Intel SDM)
+Peak throughput: **9,242 pages/sec** (Intel SDM)
 
 Build with `zig build -Doptimize=ReleaseFast` for best performance.
 
@@ -136,12 +136,12 @@ zpdf extracts text in logical reading order using a two-tier approach:
 
 1. **Structure Tree** (preferred): Uses the PDF's semantic structure for tagged/accessible PDFs (PDF/UA). Correctly handles multi-column layouts, sidebars, tables, and captions.
 
-2. **Geometric Sorting** (fallback): When no structure tree exists, sorts text by Y-coordinate (top→bottom), then X-coordinate (left→right).
+2. **Stream Order** (fallback): When no structure tree exists, extracts text in PDF content stream order. This is fast and works well for most single-column documents.
 
 | Method | Pros | Cons |
 |--------|------|------|
 | Structure tree | Correct semantic order, handles complex layouts | Only works on tagged PDFs |
-| Geometric sort | Works on any PDF | May fail on complex layouts |
+| Stream order | Fast, works on any PDF | May not match visual order for complex layouts |
 
 ## Comparison
 
@@ -150,7 +150,7 @@ zpdf extracts text in logical reading order using a two-tier approach:
 | **Text Extraction** | | | |
 | Stream order | Yes | Yes | Yes |
 | Tagged/structure tree | Yes | No | Yes |
-| Visual reading order | Experimental | No | Yes |
+| Visual reading order | No | No | Yes |
 | Word bounding boxes | Yes | Yes | Yes |
 | **Font Support** | | | |
 | WinAnsi/MacRoman | Yes | Yes | Yes |

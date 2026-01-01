@@ -434,7 +434,8 @@ fn runBench(allocator: std.mem.Allocator, args: []const []const u8) !void {
         page_count = doc.pages.items.len;
 
         if (parallel) {
-            const result = doc.extractAllTextParallel(allocator) catch {
+            // Use structured extraction (reading order) with parallel support
+            const result = doc.extractAllTextStructured(allocator) catch {
                 doc.close();
                 continue;
             };

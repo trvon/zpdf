@@ -490,20 +490,29 @@ fn ensurePageFonts(self: *Document, page_idx: usize) void {
         var reading_order = tree.getReadingOrder(arena) catch return;
 
         // Build per-page reading order cache
-        self.cached_reading_order = std.AutoHashMap(usize, std.ArrayList(structtree.MarkedContentRef)).init(self.allocator);
+        var cache = std.AutoHashMap(usize, std.ArrayList(structtree.MarkedContentRef)).init(self.allocator);
+        var has_entries = false;
 
         var it = reading_order.iterator();
         while (it.next()) |entry| {
             const obj_num = entry.key_ptr.*;
             if (page_obj_to_idx.get(@intCast(obj_num))) |page_idx| {
-                var page_mcids = self.cached_reading_order.?.getPtr(page_idx) orelse blk: {
-                    self.cached_reading_order.?.put(page_idx, .empty) catch continue;
-                    break :blk self.cached_reading_order.?.getPtr(page_idx).?;
+                var page_mcids = cache.getPtr(page_idx) orelse blk: {
+                    cache.put(page_idx, .empty) catch continue;
+                    break :blk cache.getPtr(page_idx).?;
                 };
                 for (entry.value_ptr.items) |mcr| {
                     page_mcids.append(self.allocator, mcr) catch continue;
+                    has_entries = true;
                 }
             }
+        }
+
+        // Only set cache if we have actual entries
+        if (has_entries) {
+            self.cached_reading_order = cache;
+        } else {
+            cache.deinit();
         }
     }
 
@@ -602,26 +611,95 @@ fn ensurePageFonts(self: *Document, page_idx: usize) void {
 
     /// Extract text from all pages using structure tree order
     pub fn extractAllTextStructured(self: *Document, allocator: std.mem.Allocator) ![]u8 {
+        const num_pages = self.pages.items.len;
+        if (num_pages == 0) return allocator.alloc(u8, 0);
+
+        // Skip pre-loading for large documents (lazy load is faster)
+        if (num_pages <= 100) {
+            // Pre-cache reading order once
+            self.ensureReadingOrder();
+            // Pre-load all fonts (avoids per-page overhead)
+            for (0..num_pages) |i| {
+                self.ensurePageFonts(i);
+            }
+        }
+
+        // Check if we have any structure tree data with actual entries
+        const has_structure = if (self.cached_reading_order) |cache| cache.count() > 0 else false;
+
+        // For documents without structure tree, use fast stream order
+        if (!has_structure) {
+            var result: std.ArrayList(u8) = .empty;
+            errdefer result.deinit(allocator);
+
+            const arena = self.parsing_arena.allocator();
+            for (0..num_pages) |page_num| {
+                if (page_num > 0) try result.append(allocator, '\x0c');
+                const page = self.pages.items[page_num];
+                const content = pagetree.getPageContents(arena, self.data, &self.xref_table, page, &self.object_cache) catch continue;
+                if (content.len > 0) {
+                    try extractTextFromContent(arena, content, page_num, &self.font_cache, result.writer(allocator));
+                }
+            }
+            return result.toOwnedSlice(allocator);
+        }
+
+        // Sequential extraction with structure tree
         var result: std.ArrayList(u8) = .empty;
         errdefer result.deinit(allocator);
 
-        for (0..self.pages.items.len) |i| {
-            if (i > 0) try result.append(allocator, '\x0c'); // Form feed
+        const arena = self.parsing_arena.allocator();
 
-            const page_text = try self.extractTextStructured(i, allocator);
-            defer allocator.free(page_text);
-            try result.appendSlice(allocator, page_text);
+        for (0..num_pages) |page_num| {
+            if (page_num > 0) try result.append(allocator, '\x0c'); // Form feed
+
+            const page = self.pages.items[page_num];
+
+            // Get content stream
+            const content = pagetree.getPageContents(
+                arena,
+                self.data,
+                &self.xref_table,
+                page,
+                &self.object_cache,
+            ) catch continue;
+
+            if (content.len == 0) continue;
+
+            // Check if we have cached reading order for this page
+            var used_structure = false;
+            if (self.cached_reading_order) |*cache| {
+                if (cache.get(page_num)) |mcids| {
+                    // Extract text with MCID tracking
+                    var extractor = structtree.MarkedContentExtractor.init(allocator);
+                    defer extractor.deinit();
+
+                    if (extractTextWithMcidTracking(arena, content, page_num, &self.font_cache, &extractor)) |_| {
+                        // Collect text in structure tree order
+                        const start_len = result.items.len;
+                        for (mcids.items) |mcr| {
+                            if (extractor.getTextForMcid(mcr.mcid)) |text| {
+                                if (result.items.len > start_len and text.len > 0 and result.items[result.items.len - 1] != '\x0c') {
+                                    try result.append(allocator, ' ');
+                                }
+                                try result.appendSlice(allocator, text);
+                            }
+                        }
+                        if (result.items.len > start_len) {
+                            used_structure = true;
+                        }
+                    } else |_| {}
+                }
+            }
+
+            // Fall back to stream order if structure tree didn't produce text
+            if (!used_structure) {
+                try extractTextFromContent(arena, content, page_num, &self.font_cache, result.writer(allocator));
+            }
         }
 
         return result.toOwnedSlice(allocator);
     }
-
-    /// Extract text from all pages in parallel (returns concatenated result)
-    /// Only available on non-WASM targets (use extractAllText on WASM)
-    pub const extractAllTextParallel = if (is_wasm)
-        @compileError("extractAllTextParallel is not available on WASM targets")
-    else
-        extractAllTextParallelImpl;
 
     /// Get page metadata
     pub fn getPageInfo(self: *const Document, page_num: usize) ?PageInfo {
@@ -1250,132 +1328,6 @@ pub fn extractTextFromMemory(allocator: std.mem.Allocator, data: []const u8) ![]
 
     return output.toOwnedSlice(allocator);
 }
-
-// ============================================================================
-// Parallel extraction (non-WASM only)
-// ============================================================================
-
-const extractAllTextParallelImpl = if (is_wasm) struct {
-    fn notAvailable(_: *Document, _: std.mem.Allocator) ![]u8 {
-        @compileError("extractAllTextParallel not available on WASM");
-    }
-}.notAvailable else struct {
-    fn impl(self: *Document, allocator: std.mem.Allocator) ![]u8 {
-        const num_pages = self.pages.items.len;
-        if (num_pages == 0) return try allocator.alloc(u8, 0);
-
-        // Preload all fonts before spawning threads
-        for (0..num_pages) |i| {
-            self.ensurePageFonts(i);
-        }
-
-        // Allocate result buffers for each page
-        const results = try allocator.alloc([]u8, num_pages);
-        defer allocator.free(results);
-        @memset(results, &[_]u8{});
-
-        const Thread = std.Thread;
-        const cpu_count = Thread.getCpuCount() catch 4;
-        const num_threads: usize = @min(num_pages, @min(cpu_count, 8));
-
-        const Context = struct {
-            doc: *Document,
-            results: [][]u8,
-            alloc: std.mem.Allocator,
-        };
-
-        const ctx = Context{
-            .doc = self,
-            .results = results,
-            .alloc = allocator,
-        };
-
-        // Thread worker - each thread uses its own arena and cache
-        const worker = struct {
-            fn run(c: Context, start: usize, end: usize) void {
-                // Thread-local arena for all allocations
-                var arena = std.heap.ArenaAllocator.init(c.alloc);
-                defer arena.deinit();
-                const thread_alloc = arena.allocator();
-
-                // Thread-local object cache
-                var local_cache = std.AutoHashMap(u32, Object).init(thread_alloc);
-                defer local_cache.deinit();
-
-                for (start..end) |page_num| {
-                    // Extract directly to fixed buffer to avoid allocations
-                    var buf: [65536]u8 = undefined;
-                    var fbs = std.io.fixedBufferStream(&buf);
-
-                    const page = c.doc.pages.items[page_num];
-                    const content = pagetree.getPageContents(
-                        thread_alloc,
-                        c.doc.data,
-                        &c.doc.xref_table,
-                        page,
-                        &local_cache,
-                    ) catch continue;
-
-                    extractTextFromContent(thread_alloc, content, page_num, &c.doc.font_cache, fbs.writer()) catch continue;
-
-                    if (fbs.pos > 0) {
-                        c.results[page_num] = c.alloc.dupe(u8, buf[0..fbs.pos]) catch &[_]u8{};
-                    }
-                }
-            }
-        }.run;
-
-        // Spawn threads
-        var threads: [8]?Thread = [_]?Thread{null} ** 8;
-        const pages_per_thread = (num_pages + num_threads - 1) / num_threads;
-
-        for (0..num_threads) |i| {
-            const start = i * pages_per_thread;
-            const end = @min(start + pages_per_thread, num_pages);
-            if (start < end) {
-                threads[i] = Thread.spawn(.{}, worker, .{ ctx, start, end }) catch null;
-            }
-        }
-
-        // Wait for all threads
-        for (&threads) |*t| {
-            if (t.*) |thread| thread.join();
-        }
-
-        // Calculate total size - only count separators between non-empty results
-        var total_size: usize = 0;
-        var non_empty_count: usize = 0;
-        for (results) |r| {
-            if (r.len > 0) {
-                total_size += r.len;
-                non_empty_count += 1;
-            }
-        }
-        if (non_empty_count > 1) {
-            total_size += non_empty_count - 1; // separators between non-empty results
-        }
-
-        if (total_size == 0) return allocator.alloc(u8, 0);
-
-        var output = try allocator.alloc(u8, total_size);
-        var pos: usize = 0;
-        var first_written = false;
-        for (results) |r| {
-            if (r.len > 0) {
-                if (first_written) {
-                    output[pos] = '\x0c';
-                    pos += 1;
-                }
-                @memcpy(output[pos..][0..r.len], r);
-                pos += r.len;
-                allocator.free(r);
-                first_written = true;
-            }
-        }
-
-        return output;
-    }
-}.impl;
 
 // ============================================================================
 // TESTS
