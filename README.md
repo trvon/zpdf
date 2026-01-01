@@ -146,6 +146,20 @@ python/zpdf/         # Python bindings (cffi)
 examples/            # Usage examples
 ```
 
+## Reading Order
+
+zpdf uses a two-tier approach for extracting text in logical reading order:
+
+1. **Structure Tree** (preferred): Uses the PDF's semantic structure as defined by the document author. This is the correct approach for tagged/accessible PDFs (PDF/UA) and properly handles multi-column layouts, sidebars, tables, and captions.
+
+2. **Geometric Sorting** (fallback): When no structure tree exists, zpdf falls back to sorting text by Y-coordinate (top→bottom), then X-coordinate (left→right), with automatic two-column detection.
+
+| Method | Pros | Cons |
+|--------|------|------|
+| Structure tree | Correct semantic order, handles complex layouts | Only works on tagged PDFs |
+| Geometric sort | Works on any PDF, handles two-column | Can fail on complex layouts |
+| Stream order | Fast, raw extraction | Often wrong order |
+
 ## Comparison
 
 | Feature | zpdf | pdfium | MuPDF |

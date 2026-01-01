@@ -483,13 +483,13 @@ fn ensurePageFonts(self: *Document, page_idx: usize) void {
 
         // Parse structure tree to get reading order
         var tree = structtree.parseStructTree(arena, self.data, &self.xref_table, &self.object_cache) catch
-            return self.extractTextToBuffer(page_num, allocator);
+            return self.extractTextGeometric(page_num, allocator);
 
         defer tree.deinit();
 
         if (tree.root == null) {
-            // No structure tree, fall back to stream order
-            return self.extractTextToBuffer(page_num, allocator);
+            // No structure tree, fall back to geometric sorting
+            return self.extractTextGeometric(page_num, allocator);
         }
 
         // Build page index mapping (object number -> page index)
@@ -533,17 +533,43 @@ fn ensurePageFonts(self: *Document, page_idx: usize) void {
             }
         }
 
-        // If we got no content from structure tree, fall back to stream order
+        // If we got no content from structure tree, fall back to geometric sorting
         if (result.items.len == 0) {
             result.deinit(allocator);
-            return self.extractTextToBuffer(page_num, allocator);
+            return self.extractTextGeometric(page_num, allocator);
         }
 
         return result.toOwnedSlice(allocator);
     }
 
-    /// Extract text to a buffer (helper for fallback)
-    fn extractTextToBuffer(self: *Document, page_num: usize, allocator: std.mem.Allocator) ![]u8 {
+    /// Extract text using geometric sorting (fallback when no structure tree)
+    /// Sorts text by Y (top to bottom), then X (left to right), with two-column detection
+    fn extractTextGeometric(self: *Document, page_num: usize, allocator: std.mem.Allocator) ![]u8 {
+        const page = self.pages.items[page_num];
+        const page_width = page.media_box[2] - page.media_box[0];
+
+        const spans = self.extractTextWithBounds(page_num, allocator) catch |err| {
+            // If bounds extraction fails, fall back to stream order
+            if (err == error.OutOfMemory) return err;
+            return self.extractTextStreamOrder(page_num, allocator);
+        };
+
+        if (spans.len == 0) {
+            allocator.free(spans);
+            return allocator.alloc(u8, 0);
+        }
+        defer allocator.free(spans);
+
+        var layout_result = layout.analyzeLayout(allocator, spans, page_width) catch {
+            return self.extractTextStreamOrder(page_num, allocator);
+        };
+        defer layout_result.deinit();
+
+        return layout_result.getTextInOrder(allocator);
+    }
+
+    /// Extract text in raw stream order (last resort fallback)
+    fn extractTextStreamOrder(self: *Document, page_num: usize, allocator: std.mem.Allocator) ![]u8 {
         var output: std.ArrayList(u8) = .empty;
         errdefer output.deinit(allocator);
 
