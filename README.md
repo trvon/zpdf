@@ -39,6 +39,8 @@ Batch processing benchmark on [veraPDF test corpus](https://github.com/veraPDF/v
 | zpdf | **0.5s** | **6,013** | **4.7x** |
 | PyMuPDF | 2.3s | 1,274 | 1x |
 
+**Accuracy** (vs PyMuPDF): 95.8% average similarity, 91.2% exact match
+
 ## Requirements
 
 - Zig 0.15.2 or later
