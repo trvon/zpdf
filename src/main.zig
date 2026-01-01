@@ -58,9 +58,9 @@ fn printUsage() !void {
         \\  -o FILE         Output to file (default: stdout)
         \\  -p PAGES        Page range (e.g., "1-10" or "1,3,5")
         \\  --sequential    Disable parallel extraction
-        \\  --stream-order  Use content stream order (default, fastest)
-        \\  --reading-order Use visual reading order (slower)
-        \\  --tagged        Use structure tree for reading order (for tagged PDFs)
+        \\  --stream-order  Use content stream order (fastest, raw order)
+        \\  --reading-order Use visual reading order (experimental, slower)
+        \\  (default)       Use structure tree for logical reading order (tagged PDFs)
         \\  --strict        Fail on any parse error
         \\  --permissive    Continue past all errors
         \\  --json          Output as JSON with positions
@@ -69,16 +69,16 @@ fn printUsage() !void {
         \\  zpdf extract document.pdf              # All pages to stdout
         \\  zpdf extract -o out.txt document.pdf   # All pages to file
         \\  zpdf extract -p 1-10 document.pdf      # First 10 pages
-        \\  zpdf extract --tagged document.pdf     # Use PDF structure tree
+        \\  zpdf extract --stream-order doc.pdf     # Raw stream order (faster)
         \\  zpdf bench document.pdf                # Benchmark vs mutool
         \\
     );
 }
 
 const ExtractionMode = enum {
-    stream, // Default: extract in content stream order
+    stream, // Extract in content stream order (fastest)
     visual, // Use visual layout analysis for reading order
-    tagged, // Use structure tree (tagged PDF) for reading order
+    tagged, // Default: use structure tree for reading order (for tagged PDFs)
 };
 
 fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !void {
@@ -88,7 +88,7 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var error_mode: zpdf.ErrorConfig = zpdf.ErrorConfig.default();
     var json_output = false;
     var sequential = false;
-    var extraction_mode: ExtractionMode = .stream;
+    var extraction_mode: ExtractionMode = .tagged;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
