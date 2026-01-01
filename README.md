@@ -22,7 +22,7 @@ Text extraction performance on Apple M4 Pro (reading order):
 | [Intel SDM](https://cdrdv2.intel.com/v1/dl/getContent/671200) | 5,252 | **568ms** | 2,171ms | 3.8x |
 | [Pandas Docs](https://pandas.pydata.org/pandas-docs/version/1.4/pandas.pdf) | 3,743 | **558ms** | 1,147ms | 2.1x |
 | [C++ Standard](https://open-std.org/jtc1/sc22/wg21/docs/papers/2023/n4950.pdf) | 2,134 | **349ms** | 1,001ms | 2.9x |
-| [Acrobat Reference](https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/pdfreference1.7old.pdf) | 651 | **139ms** | 513ms | 3.7x |
+| [PDF Reference 1.7](https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/pdfreference1.7old.pdf) | 1,310 | **332ms** | 1,445ms | 4.4x |
 
 *Lower is better. Build with `zig build -Doptimize=ReleaseFast`.*
 
