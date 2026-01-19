@@ -234,6 +234,7 @@ pub const Document = struct {
         doc.* = .{
             .data = data,
             .owns_data = false,
+            .data_is_allocated = false,
             .xref_table = XRefTable.init(allocator),
             .pages = .empty,
             .object_cache = std.AutoHashMap(u32, Object).init(allocator),
@@ -394,16 +395,12 @@ pub const Document = struct {
     pub fn close(self: *Document) void {
         if (self.owns_data and !is_wasm) {
             const aligned_ptr: [*]align(std.heap.page_size_min) u8 = @ptrCast(@alignCast(@constCast(self.data.ptr)));
-            if (comptime is_windows) {
-                // Windows: always use allocator.free
+            if (self.data_is_allocated) {
+                // Windows (always) or future POSIX allocated path
                 self.allocator.free(aligned_ptr[0..self.data.len]);
-            } else {
-                // POSIX: check if allocated or mmap'd
-                if (self.data_is_allocated) {
-                    self.allocator.free(aligned_ptr[0..self.data.len]);
-                } else {
-                    std.posix.munmap(aligned_ptr[0..self.data.len]);
-                }
+            } else if (comptime !is_windows) {
+                // POSIX: memory-mapped file
+                std.posix.munmap(aligned_ptr[0..self.data.len]);
             }
         }
 
@@ -1625,4 +1622,28 @@ test "ErrorConfig presets" {
 
     const permissive = ErrorConfig.permissive();
     try std.testing.expect(permissive.continue_on_parse_error);
+}
+
+test "allocated memory path cleanup" {
+    // This test exercises the Windows-style allocated memory path
+    // to ensure data_is_allocated=true cleanup works correctly.
+    // On Windows, openWithConfig uses alignedAlloc instead of mmap.
+    const allocator = std.testing.allocator;
+    const testpdf = @import("testpdf.zig");
+
+    // Generate test PDF data
+    const pdf_data = try testpdf.generateMinimalPdf(allocator, "AllocTest");
+    defer allocator.free(pdf_data);
+
+    // Create page-aligned copy (simulates Windows file read path)
+    const aligned_data = try allocator.alignedAlloc(u8, .fromByteUnits(std.heap.page_size_min), pdf_data.len);
+    @memcpy(aligned_data, pdf_data);
+    // Note: don't defer free - Document takes ownership
+
+    // Use the allocated memory path (exercises data_is_allocated=true)
+    const doc = try Document.openFromMemoryOwnedAlloc(allocator, aligned_data, ErrorConfig.default());
+    defer doc.close(); // This must free aligned_data via allocator.free()
+
+    // Verify document parsed correctly
+    try std.testing.expectEqual(@as(usize, 1), doc.pageCount());
 }
