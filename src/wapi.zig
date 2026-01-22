@@ -129,7 +129,7 @@ export fn zpdf_extract_all_markdown(handle: i32, out_len: *usize) ?[*]u8 {
     if (documents[idx]) |doc| {
         const result = doc.extractAllMarkdown(wasm_allocator) catch return null;
 
-        // Handle empty buffer - toOwnedSlice returns undefined ptr for empty slice
+        // extractAllMarkdown returns an allocated slice; treat zero-length as "no data"
         if (result.len == 0) {
             out_len.* = 0;
             return null;
