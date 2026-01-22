@@ -195,6 +195,7 @@ export fn zpdf_extract_all_markdown(handle: ?*ZpdfDocument, out_len: *usize) ?[*
 
         // extractAllMarkdown returns an allocated slice; treat zero-length as "no data"
         if (result.len == 0) {
+            c_allocator.free(result);
             out_len.* = 0;
             return null;
         }
