@@ -57,6 +57,7 @@ export fn zpdf_extract_page(handle: ?*ZpdfDocument, page_num: c_int, out_len: *u
         if (page_num < 0) return null;
 
         var buffer: std.ArrayList(u8) = .empty;
+        errdefer buffer.deinit(c_allocator);
         doc.extractText(@intCast(page_num), compat.arrayListWriter(&buffer, c_allocator)) catch return null;
 
         const slice = buffer.toOwnedSlice(c_allocator) catch return null;

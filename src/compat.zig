@@ -230,7 +230,10 @@ pub fn runIgnored(argv: []const []const u8, allocator: std.mem.Allocator) !u8 {
         child.stderr_behavior = .Ignore;
         child.stdout_behavior = .Ignore;
         const term = try child.spawnAndWait();
-        return term.Exited;
+        return switch (term) {
+            .Exited => |code| code,
+            else => 255,
+        };
     } else {
         var child = try std.process.spawn(currentIo(), .{
             .argv = argv,
