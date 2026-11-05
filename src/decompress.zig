@@ -46,11 +46,14 @@ pub fn decompressStreamLimited(
     max_out: usize,
 ) ![]u8 {
     const limit = @min(max_out, MAX_DECOMPRESSED_SIZE);
-    if (filter == null and data.len > max_out) return DecompressError.OutputTooLarge;
-    const filters = switch (filter orelse return try allocator.dupe(u8, data)) {
-        .name => |n| &[_][]const u8{n},
+    // Declared here, not inside the switch, so the slice below outlives it.
+    var names: [16][]const u8 = undefined;
+    const filters: []const []const u8 = switch (filter orelse Object{ .array = &.{} }) {
+        .name => |n| blk: {
+            names[0] = n;
+            break :blk names[0..1];
+        },
         .array => |arr| blk: {
-            var names: [16][]const u8 = undefined;
             var count: usize = 0;
             for (arr) |item| {
                 if (item == .name and count < 16) {
@@ -60,8 +63,13 @@ pub fn decompressStreamLimited(
             }
             break :blk names[0..count];
         },
-        else => return try allocator.dupe(u8, data),
+        else => names[0..0],
     };
+    // No usable filter: the stream is returned as is, still within max_out.
+    if (filters.len == 0) {
+        if (data.len > max_out) return DecompressError.OutputTooLarge;
+        return try allocator.dupe(u8, data);
+    }
 
     var current = data;
     var owned: ?[]u8 = null;
@@ -106,13 +114,13 @@ fn applyFilter(
     if (std.mem.eql(u8, filter_name, "ASCII85Decode") or
         std.mem.eql(u8, filter_name, "A85"))
     {
-        return decodeASCII85(allocator, data);
+        return decodeASCII85(allocator, data, max_out);
     }
 
     if (std.mem.eql(u8, filter_name, "ASCIIHexDecode") or
         std.mem.eql(u8, filter_name, "AHx"))
     {
-        return decodeASCIIHex(allocator, data);
+        return decodeASCIIHex(allocator, data, max_out);
     }
 
     if (std.mem.eql(u8, filter_name, "LZWDecode") or
@@ -124,7 +132,7 @@ fn applyFilter(
     if (std.mem.eql(u8, filter_name, "RunLengthDecode") or
         std.mem.eql(u8, filter_name, "RL"))
     {
-        return decodeRunLength(allocator, data);
+        return decodeRunLength(allocator, data, max_out);
     }
 
     // DCTDecode (JPEG) and CCITTFaxDecode are for images - pass through for now
@@ -136,6 +144,7 @@ fn applyFilter(
         std.mem.eql(u8, filter_name, "JPXDecode"))
     {
         // These are image formats - return as-is for image extraction
+        if (data.len > max_out) return DecompressError.OutputTooLarge;
         return try allocator.dupe(u8, data);
     }
 
@@ -174,7 +183,11 @@ fn decodeFlateDecodeWithLimit(
         const n = decomp.reader.readSliceShort(&chunk) catch return DecompressError.DecompressFailed;
         if (output.items.len > max_size or n > max_size - output.items.len) return DecompressError.OutputTooLarge;
         const new_len = output.items.len + n;
-        try output.ensureTotalCapacityPrecise(allocator, new_len);
+        // Grow geometrically (an exact reserve per chunk copied the whole
+        // buffer every 64 KiB), but never past the limit.
+        if (new_len > output.capacity) {
+            try output.ensureTotalCapacityPrecise(allocator, @min(max_size, @max(new_len, output.capacity * 2)));
+        }
         output.appendSliceAssumeCapacity(chunk[0..n]);
         if (n < chunk.len) break;
     }
@@ -203,7 +216,9 @@ fn decodeFlateDecodeWithLimit(
                     else => 8,
                 } else 8;
 
-                const unpredicted = try applyPredictor(
+                // applyPredictor returns a new buffer; free the decoded one.
+                defer output.deinit(allocator);
+                return try applyPredictor(
                     allocator,
                     output.items,
                     predictor,
@@ -211,7 +226,6 @@ fn decodeFlateDecodeWithLimit(
                     colors,
                     bits,
                 );
-                return unpredicted;
             }
         }
     }
@@ -391,7 +405,7 @@ fn paeth(a: i16, b: i16, c: i16) u8 {
 // ASCII85DECODE
 // ============================================================================
 
-fn decodeASCII85(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
+fn decodeASCII85(allocator: std.mem.Allocator, data: []const u8, max_out: usize) ![]u8 {
     var output: std.ArrayList(u8) = .empty;
     errdefer output.deinit(allocator);
 
@@ -416,6 +430,7 @@ fn decodeASCII85(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
         // 'z' represents 4 zero bytes
         if (c == 'z') {
             if (count != 0) return DecompressError.DecompressFailed;
+            if (output.items.len + 4 > max_out) return DecompressError.OutputTooLarge;
             try output.appendSlice(allocator, &[_]u8{ 0, 0, 0, 0 });
             continue;
         }
@@ -428,6 +443,7 @@ fn decodeASCII85(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
 
         if (count == 5) {
             if (tuple > std.math.maxInt(u32)) return DecompressError.DecompressFailed;
+            if (output.items.len + 4 > max_out) return DecompressError.OutputTooLarge;
             try output.append(allocator, @truncate(tuple >> 24));
             try output.append(allocator, @truncate(tuple >> 16));
             try output.append(allocator, @truncate(tuple >> 8));
@@ -445,6 +461,7 @@ fn decodeASCII85(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
         }
         if (tuple > std.math.maxInt(u32)) return DecompressError.DecompressFailed;
 
+        if (output.items.len + (count - 1) > max_out) return DecompressError.OutputTooLarge;
         if (count >= 2) try output.append(allocator, @truncate(tuple >> 24));
         if (count >= 3) try output.append(allocator, @truncate(tuple >> 16));
         if (count >= 4) try output.append(allocator, @truncate(tuple >> 8));
@@ -457,7 +474,7 @@ fn decodeASCII85(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
 // ASCIIHEXDECODE
 // ============================================================================
 
-fn decodeASCIIHex(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
+fn decodeASCIIHex(allocator: std.mem.Allocator, data: []const u8, max_out: usize) ![]u8 {
     var output: std.ArrayList(u8) = .empty;
     errdefer output.deinit(allocator);
 
@@ -481,6 +498,7 @@ fn decodeASCIIHex(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
 
         if (nibble) |n| {
             if (high) |h| {
+                if (output.items.len >= max_out) return DecompressError.OutputTooLarge;
                 try output.append(allocator, (@as(u8, h) << 4) | n);
                 high = null;
             } else {
@@ -491,6 +509,7 @@ fn decodeASCIIHex(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
 
     // Trailing nibble is padded with 0
     if (high) |h| {
+        if (output.items.len >= max_out) return DecompressError.OutputTooLarge;
         try output.append(allocator, @as(u8, h) << 4);
     }
 
@@ -507,8 +526,23 @@ fn decodeLZW(
     params: ?Object,
     max_out: usize,
 ) ![]u8 {
-    _ = params; // TODO: EarlyChange parameter
+    // /EarlyChange (default 1): widen codes one entry before the table needs it.
+    const early: u16 = if (params) |p| switch (p) {
+        .dict => |d| if (d.get("EarlyChange")) |e| switch (e) {
+            .integer => |v| if (v == 0) 0 else 1,
+            else => 1,
+        } else 1,
+        else => 1,
+    } else 1;
+    return decodeLZWEarly(allocator, data, early, max_out);
+}
 
+fn decodeLZWEarly(
+    allocator: std.mem.Allocator,
+    data: []const u8,
+    early: u16,
+    max_out: usize,
+) ![]u8 {
     var output: std.ArrayList(u8) = .empty;
     errdefer output.deinit(allocator);
 
@@ -577,7 +611,7 @@ fn decodeLZW(
         prev_code = code;
 
         // Increase code size when needed
-        if (size >= (@as(u16, 1) << code_size) and code_size < 12) {
+        if (size + early >= (@as(u16, 1) << code_size) and code_size < 12) {
             code_size += 1;
         }
     }
@@ -628,7 +662,7 @@ fn readBits(data: []const u8, bit_pos: usize, count: u4) ?u16 {
 // RUNLENGTHDECODE
 // ============================================================================
 
-fn decodeRunLength(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
+fn decodeRunLength(allocator: std.mem.Allocator, data: []const u8, max_out: usize) ![]u8 {
     var output: std.ArrayList(u8) = .empty;
     errdefer output.deinit(allocator);
 
@@ -644,14 +678,14 @@ fn decodeRunLength(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
             // Copy next length+1 bytes literally
             const copy_len = @as(usize, length) + 1;
             if (i + copy_len > data.len) break;
-            if (copy_len > MAX_DECOMPRESSED_SIZE - output.items.len) return DecompressError.OutputTooLarge;
+            if (copy_len > max_out -| output.items.len) return DecompressError.OutputTooLarge;
             try output.appendSlice(allocator, data[i..][0..copy_len]);
             i += copy_len;
         } else {
             // Repeat next byte (257-length) times
             const repeat_count = 257 - @as(usize, length);
             if (i >= data.len) break;
-            if (repeat_count > MAX_DECOMPRESSED_SIZE - output.items.len) return DecompressError.OutputTooLarge;
+            if (repeat_count > max_out -| output.items.len) return DecompressError.OutputTooLarge;
             const byte = data[i];
             i += 1;
             try output.appendNTimes(allocator, byte, repeat_count);
@@ -669,7 +703,7 @@ test "decodeASCIIHex" {
     const allocator = std.testing.allocator;
 
     const input = "48656C6C6F>";
-    const result = try decodeASCIIHex(allocator, input);
+    const result = try decodeASCIIHex(allocator, input, MAX_DECOMPRESSED_SIZE);
     defer allocator.free(result);
 
     try std.testing.expectEqualStrings("Hello", result);
@@ -679,7 +713,7 @@ test "decodeASCIIHex with whitespace" {
     const allocator = std.testing.allocator;
 
     const input = "48 65 6C\n6C 6F>";
-    const result = try decodeASCIIHex(allocator, input);
+    const result = try decodeASCIIHex(allocator, input, MAX_DECOMPRESSED_SIZE);
     defer allocator.free(result);
 
     try std.testing.expectEqualStrings("Hello", result);
@@ -690,7 +724,7 @@ test "decodeASCII85" {
 
     // "Hello world" in ASCII85
     const input = "87cURD]j7BEbo7~>";
-    const result = try decodeASCII85(allocator, input);
+    const result = try decodeASCII85(allocator, input, MAX_DECOMPRESSED_SIZE);
     defer allocator.free(result);
 
     try std.testing.expectEqualStrings("Hello world", result);
@@ -703,7 +737,7 @@ test "decodeRunLength" {
     // [254, 'X'] = repeat 'X' 3 times
     // [128] = end
     const input = [_]u8{ 2, 'A', 'B', 'C', 254, 'X', 128 };
-    const result = try decodeRunLength(allocator, &input);
+    const result = try decodeRunLength(allocator, &input, MAX_DECOMPRESSED_SIZE);
     defer allocator.free(result);
 
     try std.testing.expectEqualStrings("ABCXXX", result);
@@ -774,28 +808,30 @@ test "limited passthrough rejects raw streams over the limit" {
 }
 
 test "fuzz: limited decompression stays within its limit and never leaks" {
-    // std.testing.Smith arrived in Zig 0.16; older toolchains skip.
+    // std.testing.Smith arrived in Zig 0.16. The callback lives inside the
+    // guarded branch so older toolchains never analyze its signature.
     if (comptime @hasDecl(std.testing, "Smith")) {
-        try std.testing.fuzz({}, fuzzDecompressLimited, .{
+        const Fuzz = struct {
+            fn one(_: void, smith: *std.testing.Smith) !void {
+                const filters = [_][]const u8{
+                    "FlateDecode", "ASCIIHexDecode", "ASCII85Decode", "LZWDecode", "RunLengthDecode",
+                };
+                var buf: [4096]u8 = undefined;
+                const filter: Object = .{ .name = filters[smith.value(u8) % filters.len] };
+                const limit = smith.valueRangeAtMost(u32, 0, 1 << 20);
+                const data = buf[0..smith.slice(&buf)];
+
+                // std.testing.allocator fails the test on any leak, including on error paths.
+                const a = std.testing.allocator;
+                const out = decompressStreamLimited(a, data, filter, null, limit) catch return;
+                defer a.free(out);
+                try std.testing.expect(out.len <= limit);
+            }
+        };
+        try std.testing.fuzz({}, Fuzz.one, .{
             .corpus = &.{@embedFile("testdata/zeros_1mib.zlib")},
         });
     } else return error.SkipZigTest;
-}
-
-fn fuzzDecompressLimited(_: void, smith: *std.testing.Smith) !void {
-    const filters = [_][]const u8{
-        "FlateDecode", "ASCIIHexDecode", "ASCII85Decode", "LZWDecode", "RunLengthDecode",
-    };
-    var buf: [4096]u8 = undefined;
-    const filter: Object = .{ .name = filters[smith.value(u8) % filters.len] };
-    const limit = smith.valueRangeAtMost(u32, 0, 1 << 20);
-    const data = buf[0..smith.slice(&buf)];
-
-    // std.testing.allocator fails the test on any leak, including on error paths.
-    const a = std.testing.allocator;
-    const out = decompressStreamLimited(a, data, filter, null, limit) catch return;
-    defer a.free(out);
-    try std.testing.expect(out.len <= limit);
 }
 
 test "ASCII85 rejects groups above 2^32-1 instead of overflowing" {
@@ -819,7 +855,7 @@ test "LZW decodes the PDF reference example" {
 
 /// String-table LZW reference with the same code-width and table rules as
 /// decodeLZW, for differential testing.
-fn referenceLZW(a: std.mem.Allocator, data: []const u8) ![]u8 {
+fn referenceLZW(a: std.mem.Allocator, data: []const u8, early: usize) ![]u8 {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const ar = arena.allocator();
@@ -867,7 +903,7 @@ fn referenceLZW(a: std.mem.Allocator, data: []const u8) ![]u8 {
             }
         }
         prev = code;
-        if (table.items.len >= (@as(usize, 1) << code_size) and code_size < 12) code_size += 1;
+        if (table.items.len + early >= (@as(usize, 1) << code_size) and code_size < 12) code_size += 1;
     }
     return out.toOwnedSlice(a);
 }
@@ -880,13 +916,117 @@ test "LZW matches the string-table reference on random code streams" {
     for (0..5_000) |_| {
         const n = r.uintLessThan(usize, buf.len);
         r.bytes(buf[0..n]);
-        const want = try referenceLZW(a, buf[0..n]);
+        const early: u16 = r.uintAtMost(u16, 1);
+        const want = try referenceLZW(a, buf[0..n], early);
         defer a.free(want);
-        const got = decompressStreamLimited(a, buf[0..n], .{ .name = "LZWDecode" }, null, MAX_DECOMPRESSED_SIZE) catch |err| {
+        const got = decodeLZWEarly(a, buf[0..n], early, MAX_DECOMPRESSED_SIZE) catch |err| {
             std.debug.print("decodeLZW failed with {t} on {d} bytes\n", .{ err, n });
             return err;
         };
         defer a.free(got);
         try std.testing.expectEqualSlices(u8, want, got);
     }
+}
+
+/// Minimal LZW encoder (MSB-first, clear code first, EOD last) with the
+/// same /EarlyChange width rule as the decoder, for round-trip tests.
+fn encodeLZW(a: std.mem.Allocator, input: []const u8, early: u16) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(a);
+    var acc: u32 = 0;
+    var nbits: u5 = 0;
+    var width: u4 = 9;
+    var dict: std.AutoHashMapUnmanaged(u32, u16) = .empty;
+    defer dict.deinit(a);
+    var next: u16 = 258;
+    const emit = struct {
+        fn f(o: *std.ArrayList(u8), al: std.mem.Allocator, ac: *u32, nb: *u5, code: u16, w: u4) !void {
+            ac.* = (ac.* << w) | code;
+            nb.* += w;
+            while (nb.* >= 8) {
+                nb.* -= 8;
+                try o.append(al, @truncate(ac.* >> nb.*));
+            }
+            ac.* &= (@as(u32, 1) << nb.*) - 1;
+        }
+    }.f;
+    try emit(&out, a, &acc, &nbits, 256, width);
+    if (input.len > 0) {
+        var cur: u16 = input[0];
+        for (input[1..]) |b| {
+            const key = (@as(u32, cur) << 8) | b;
+            if (dict.get(key)) |code| {
+                cur = code;
+                continue;
+            }
+            // Width the decoder uses for this code: it lags one entry behind.
+            while (width < 12 and next - 1 + early >= (@as(u16, 1) << width)) width += 1;
+            try emit(&out, a, &acc, &nbits, cur, width);
+            if (next < 4096) {
+                try dict.put(a, key, next);
+                next += 1;
+            }
+            cur = b;
+        }
+        while (width < 12 and next - 1 + early >= (@as(u16, 1) << width)) width += 1;
+        try emit(&out, a, &acc, &nbits, cur, width);
+        if (next < 4096) next += 1;
+    }
+    while (width < 12 and next - 1 + early >= (@as(u16, 1) << width)) width += 1;
+    try emit(&out, a, &acc, &nbits, 257, width);
+    if (nbits > 0) try out.append(a, @truncate(acc << (8 - @as(u5, nbits))));
+    return out.toOwnedSlice(a);
+}
+
+test "LZW round-trips across code-width changes for both EarlyChange values" {
+    const a = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0xEC0);
+    const r = prng.random();
+    var buf: [30_000]u8 = undefined;
+    for (0..60) |i| {
+        const n = r.uintAtMost(usize, buf.len);
+        // Small alphabets build long dictionary chains; full bytes fill the table.
+        const alphabet: u8 = if (i % 3 == 0) 4 else if (i % 3 == 1) 26 else 255;
+        for (buf[0..n]) |*b| b.* = r.uintAtMost(u8, alphabet);
+        for ([_]u16{ 0, 1 }) |early| {
+            const enc = try encodeLZW(a, buf[0..n], early);
+            defer a.free(enc);
+            const dec = try decodeLZWEarly(a, enc, early, MAX_DECOMPRESSED_SIZE);
+            defer a.free(dec);
+            try std.testing.expectEqualSlices(u8, buf[0..n], dec);
+        }
+    }
+    // /DecodeParms selects the rule; the default is EarlyChange 1.
+    var parms_entries = [_]Object.Dict.Entry{.{ .key = "EarlyChange", .value = .{ .integer = 0 } }};
+    const parms: Object = .{ .dict = .{ .entries = &parms_entries } };
+    for (buf[0..20_000]) |*b| b.* = r.uintAtMost(u8, 26);
+    const enc0 = try encodeLZW(a, buf[0..20_000], 0);
+    defer a.free(enc0);
+    const dec0 = try decompressStream(a, enc0, .{ .name = "LZWDecode" }, parms);
+    defer a.free(dec0);
+    try std.testing.expectEqualSlices(u8, buf[0..20_000], dec0);
+    const enc1 = try encodeLZW(a, buf[0..20_000], 1);
+    defer a.free(enc1);
+    const dec1 = try decompressStream(a, enc1, .{ .name = "LZWDecode" }, null);
+    defer a.free(dec1);
+    try std.testing.expectEqualSlices(u8, buf[0..20_000], dec1);
+}
+
+test "limited decoders stop at the limit" {
+    const a = std.testing.allocator;
+    const cases = [_]struct { name: []const u8, data: []const u8 }{
+        .{ .name = "ASCIIHexDecode", .data = "41424344454647>" },
+        .{ .name = "ASCII85Decode", .data = "zzzz~>" },
+        .{ .name = "RunLengthDecode", .data = &.{ 0x81, 'x', 0x81, 'y', 0x80 } },
+        .{ .name = "DCTDecode", .data = "0123456789" },
+    };
+    for (cases) |c| {
+        try std.testing.expectError(
+            DecompressError.OutputTooLarge,
+            decompressStreamLimited(a, c.data, .{ .name = c.name }, null, 3),
+        );
+    }
+    // An empty or malformed filter returns the data, but still within the limit.
+    try std.testing.expectError(DecompressError.OutputTooLarge, decompressStreamLimited(a, "0123456789", .{ .array = &.{} }, null, 4));
+    try std.testing.expectError(DecompressError.OutputTooLarge, decompressStreamLimited(a, "0123456789", .{ .integer = 7 }, null, 4));
 }

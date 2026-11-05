@@ -138,10 +138,10 @@ pub const Document = struct {
     cached_reading_order: ?std.AutoHashMap(usize, std.ArrayList(structtree.MarkedContentRef)) = null,
     reading_order_parsed: bool = false,
 
-    /// Most bytes one page's text extraction may decompress, counting the
-    /// page content and every Form XObject it draws. Bounds per-page scratch
-    /// memory. Unlimited by default; a page over the limit yields the text
-    /// extracted before it was reached.
+    /// Most bytes one page's extraction may decompress: the page content on
+    /// every extraction path, plus the Form XObjects that extractText draws.
+    /// Bounds per-page scratch memory. Unlimited by default. A page whose
+    /// content exceeds it yields no text; a form that exceeds it is skipped.
     page_decompress_limit: usize = std.math.maxInt(usize),
 
     /// Open a PDF file (not available on WASM)
@@ -518,13 +518,14 @@ pub const Document = struct {
         const scratch_allocator = scratch_arena.allocator();
 
         // Get content stream (allocated from arena, no need to free)
-        const content = pagetree.getPageContents(
+        const content = pagetree.getPageContentsLimited(
             parse_allocator,
             scratch_allocator,
             self.data,
             &self.xref_table,
             page,
             &self.object_cache,
+            self.page_decompress_limit,
         ) catch |err| {
             if (self.error_config.continue_on_parse_error) {
                 try self.recordError(.{
@@ -582,13 +583,14 @@ pub const Document = struct {
         defer scratch_arena.deinit();
         const scratch_allocator = scratch_arena.allocator();
 
-        const content = pagetree.getPageContents(
+        const content = pagetree.getPageContentsLimited(
             parse_allocator,
             scratch_allocator,
             self.data,
             &self.xref_table,
             page,
             &self.object_cache,
+            self.page_decompress_limit,
         ) catch return &.{};
 
         if (content.len == 0) return &.{};
@@ -702,13 +704,14 @@ pub const Document = struct {
         const page = self.pages.items[page_num];
 
         // Get content stream
-        const content = pagetree.getPageContents(
+        const content = pagetree.getPageContentsLimited(
             parse_allocator,
             scratch_allocator,
             self.data,
             &self.xref_table,
             page,
             &self.object_cache,
+            self.page_decompress_limit,
         ) catch return allocator.alloc(u8, 0);
 
         if (content.len == 0) return allocator.alloc(u8, 0);
@@ -809,7 +812,7 @@ pub const Document = struct {
         defer scratch_arena.deinit();
         const scratch_allocator = scratch_arena.allocator();
         const page = self.pages.items[page_num];
-        const content = pagetree.getPageContents(parse_allocator, scratch_allocator, self.data, &self.xref_table, page, &self.object_cache) catch return output.toOwnedSlice(allocator);
+        const content = pagetree.getPageContentsLimited(parse_allocator, scratch_allocator, self.data, &self.xref_table, page, &self.object_cache, self.page_decompress_limit) catch return output.toOwnedSlice(allocator);
 
         try self.ensurePageFonts(page_num);
         try extractTextFromContent(scratch_allocator, content, page_num, &self.font_cache, compat.arrayListWriter(&output, allocator));
@@ -886,13 +889,14 @@ pub const Document = struct {
                 const scratch_allocator = scratch_arena.allocator();
 
                 const page = self.pages.items[page_num];
-                const content = pagetree.getPageContents(
+                const content = pagetree.getPageContentsLimited(
                     parse_allocator,
                     scratch_allocator,
                     self.data,
                     &self.xref_table,
                     page,
                     &self.object_cache,
+                    self.page_decompress_limit,
                 ) catch continue;
 
                 if (content.len == 0) continue;
@@ -1508,13 +1512,14 @@ pub const Document = struct {
         defer scratch_arena.deinit();
         const scratch_allocator = scratch_arena.allocator();
 
-        const content = pagetree.getPageContents(
+        const content = pagetree.getPageContentsLimited(
             arena,
             scratch_allocator,
             self.data,
             &self.xref_table,
             page,
             &self.object_cache,
+            self.page_decompress_limit,
         ) catch return allocator.alloc(ImageInfo, 0);
 
         if (content.len == 0) return allocator.alloc(ImageInfo, 0);
@@ -1921,8 +1926,9 @@ const DecompressBudget = struct {
 
 /// Decompressed Form XObject content for one page, keyed by the address of
 /// the form's raw stream bytes. A form drawn many times on a page is
-/// decompressed once. Entries live in the page scratch arena.
-const FormCache = std.AutoHashMapUnmanaged(usize, []const u8);
+/// decompressed once; null records a form that failed (corrupt or over
+/// budget) so it is not retried. Entries live in the page scratch arena.
+const FormCache = std.AutoHashMapUnmanaged(usize, ?[]const u8);
 
 const ExtractionContext = struct {
     parse_allocator: std.mem.Allocator,
@@ -2288,14 +2294,18 @@ fn handleDoOperator(
     // Decompress the Form XObject content once per page. Scratch is an arena,
     // so a per-use copy would stay alive until the page ends.
     const form_key = @intFromPtr(xobj_resolved.data.ptr);
-    const form_content = ctx.forms.get(form_key) orelse blk: {
+    const form_content = if (ctx.forms.get(form_key)) |cached|
+        cached orelse return // failed before on this page
+    else blk: {
         const filter = xobj_resolved.dict.get("Filter");
         const params = xobj_resolved.dict.get("DecodeParms");
         const decoded = decompress.decompressStreamLimited(ctx.scratch_allocator, xobj_resolved.data, filter, params, ctx.budget.remaining) catch |err| {
             if (err == error.OutOfMemory) return err;
-            return; // corrupt, unsupported, or over the page budget: skip the form
+            // Corrupt, unsupported, or over the page budget: skip it on every Do.
+            try ctx.forms.put(ctx.scratch_allocator, form_key, null);
+            return;
         };
-        if (!ctx.budget.take(decoded.len)) return;
+        _ = ctx.budget.take(decoded.len); // decoded.len <= remaining by construction
         try ctx.forms.put(ctx.scratch_allocator, form_key, decoded);
         break :blk decoded;
     };

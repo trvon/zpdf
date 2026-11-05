@@ -1118,3 +1118,20 @@ test "page extraction invariants under random forms and limits" {
         }
     }
 }
+
+test "page decompress limit applies to the bounds path" {
+    const allocator = std.testing.allocator;
+    const pdf_data = try testpdf.generateRepeatedFormPdf(allocator, 2, 16);
+    defer allocator.free(pdf_data);
+    const doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+
+    const all = try doc.extractTextWithBounds(0, allocator);
+    defer zpdf.Document.freeTextSpans(allocator, all);
+    try std.testing.expect(all.len > 0);
+
+    doc.page_decompress_limit = 8; // smaller than the page content
+    const none = try doc.extractTextWithBounds(0, allocator);
+    defer zpdf.Document.freeTextSpans(allocator, none);
+    try std.testing.expectEqual(@as(usize, 0), none.len);
+}
