@@ -314,9 +314,24 @@ pub fn getPageContents(
     page: Page,
     cache: *std.AutoHashMap(u32, Object),
 ) ![]const u8 {
-    const contents = page.dict.get("Contents") orelse return &[_]u8{};
+    return getPageContentsLimited(parse_allocator, scratch_allocator, data, xref, page, cache, std.math.maxInt(usize));
+}
 
-    return getStreamData(parse_allocator, scratch_allocator, data, xref, contents, cache);
+/// Like getPageContents, but fails with error.OutputTooLarge once the
+/// decompressed content (all streams of a /Contents array together)
+/// would exceed `max_out` bytes. Decompression stops at the limit.
+pub fn getPageContentsLimited(
+    parse_allocator: std.mem.Allocator,
+    scratch_allocator: std.mem.Allocator,
+    data: []const u8,
+    xref: *const XRefTable,
+    page: Page,
+    cache: *std.AutoHashMap(u32, Object),
+    max_out: usize,
+) ![]const u8 {
+    const contents = page.dict.get("Contents") orelse return &[_]u8{};
+    var remaining = max_out;
+    return getStreamData(parse_allocator, scratch_allocator, data, xref, contents, cache, &remaining);
 }
 
 fn getStreamData(
@@ -326,20 +341,28 @@ fn getStreamData(
     xref: *const XRefTable,
     obj: Object,
     cache: *std.AutoHashMap(u32, Object),
+    remaining: *usize,
 ) ![]const u8 {
     switch (obj) {
         .reference => |ref| {
             const resolved = try resolveRef(parse_allocator, data, xref, ref, cache);
-            return getStreamData(parse_allocator, scratch_allocator, data, xref, resolved, cache);
+            return getStreamData(parse_allocator, scratch_allocator, data, xref, resolved, cache, remaining);
         },
         .stream => |s| {
             const decompress = @import("decompress.zig");
-            return decompress.decompressStream(
+            const decoded = decompress.decompressStreamLimited(
                 scratch_allocator,
                 s.data,
                 s.dict.get("Filter"),
                 s.dict.get("DecodeParms"),
-            ) catch return s.data;
+                remaining.*,
+            ) catch |err| switch (err) {
+                error.OutOfMemory, error.OutputTooLarge => return err,
+                // Corrupt or unsupported filter: fall back to the raw bytes, as before.
+                else => if (s.data.len > remaining.*) return error.OutputTooLarge else s.data,
+            };
+            remaining.* -= decoded.len;
+            return decoded;
         },
         .array => |arr| {
             // Concatenate multiple content streams
@@ -347,7 +370,7 @@ fn getStreamData(
             errdefer result.deinit(scratch_allocator);
 
             for (arr) |item| {
-                const stream_data = try getStreamData(parse_allocator, scratch_allocator, data, xref, item, cache);
+                const stream_data = try getStreamData(parse_allocator, scratch_allocator, data, xref, item, cache, remaining);
                 // stream_data is arena-allocated, no need to free
                 try result.appendSlice(scratch_allocator, stream_data);
                 try result.append(scratch_allocator, '\n'); // Separate streams

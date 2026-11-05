@@ -1233,6 +1233,104 @@ pub fn generateExtendedPageLabelPdf(allocator: std.mem.Allocator) ![]u8 {
     return pdf.toOwnedSlice(allocator);
 }
 
+/// Allocator wrapper that records live and peak bytes, for memory tests.
+pub const PeakAllocator = struct {
+    child: std.mem.Allocator,
+    live: usize = 0,
+    peak: usize = 0,
+
+    pub fn allocator(self: *PeakAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn note(self: *PeakAllocator, old_len: usize, new_len: usize) void {
+        self.live = self.live - old_len + new_len;
+        self.peak = @max(self.peak, self.live);
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *PeakAllocator = @ptrCast(@alignCast(ctx));
+        const p = self.child.rawAlloc(len, alignment, ra) orelse return null;
+        self.note(0, len);
+        return p;
+    }
+
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) bool {
+        const self: *PeakAllocator = @ptrCast(@alignCast(ctx));
+        if (!self.child.rawResize(memory, alignment, new_len, ra)) return false;
+        self.note(memory.len, new_len);
+        return true;
+    }
+
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
+        const self: *PeakAllocator = @ptrCast(@alignCast(ctx));
+        const p = self.child.rawRemap(memory, alignment, new_len, ra) orelse return null;
+        self.note(memory.len, new_len);
+        return p;
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *PeakAllocator = @ptrCast(@alignCast(ctx));
+        self.child.rawFree(memory, alignment, ra);
+        self.note(memory.len, 0);
+    }
+};
+
+/// Generate a one-page PDF whose content draws the same Form XObject `uses`
+/// times. The form's stream is padded with `padding` spaces, so each
+/// decompressed copy is that large.
+pub fn generateRepeatedFormPdf(allocator: std.mem.Allocator, uses: usize, padding: usize) ![]u8 {
+    var pdf: std.ArrayList(u8) = .empty;
+    errdefer pdf.deinit(allocator);
+    var writer = compat.arrayListWriter(&pdf, allocator);
+
+    try writer.writeAll("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
+
+    const obj1_offset = pdf.items.len;
+    try writer.writeAll("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+
+    const obj2_offset = pdf.items.len;
+    try writer.writeAll("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+
+    const obj3_offset = pdf.items.len;
+    try writer.writeAll("3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] ");
+    try writer.writeAll("/Contents 4 0 R /Resources << /Font << /F1 5 0 R >> /XObject << /Fm1 6 0 R >> >> >>\nendobj\n");
+
+    var content: std.ArrayList(u8) = .empty;
+    defer content.deinit(allocator);
+    try content.appendSlice(allocator, "BT\n/F1 12 Tf\n100 700 Td\n(PageText) Tj\nET\n");
+    for (0..uses) |_| try content.appendSlice(allocator, "/Fm1 Do\n");
+    const obj4_offset = pdf.items.len;
+    try writer.print("4 0 obj\n<< /Length {} >>\nstream\n{s}\nendstream\nendobj\n", .{ content.items.len, content.items });
+
+    const obj5_offset = pdf.items.len;
+    try writer.writeAll("5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica ");
+    try writer.writeAll("/Encoding /WinAnsiEncoding >>\nendobj\n");
+
+    const form_text = "BT\n/F1 12 Tf\n100 600 Td\n(FormText) Tj\nET\n";
+    const obj6_offset = pdf.items.len;
+    try writer.print("6 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 612 792] " ++
+        "/Resources << /Font << /F1 5 0 R >> >> /Length {} >>\nstream\n{s}", .{ form_text.len + padding, form_text });
+    for (0..padding) |_| try writer.writeAll(" ");
+    try writer.writeAll("\nendstream\nendobj\n");
+
+    const xref_offset = pdf.items.len;
+    try writer.writeAll("xref\n0 7\n");
+    try writer.writeAll("0000000000 65535 f \n");
+    for ([_]usize{ obj1_offset, obj2_offset, obj3_offset, obj4_offset, obj5_offset, obj6_offset }) |off| {
+        try writer.print("{d:0>10} 00000 n \n", .{off});
+    }
+    try writer.writeAll("trailer\n<< /Size 7 /Root 1 0 R >>\n");
+    try writer.print("startxref\n{}\n%%EOF\n", .{xref_offset});
+
+    return pdf.toOwnedSlice(allocator);
+}
+
 /// Generate a PDF with an XObject image on the page
 pub fn generateImagePdf(allocator: std.mem.Allocator) ![]u8 {
     var pdf: std.ArrayList(u8) = .empty;

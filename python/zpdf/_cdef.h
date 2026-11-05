@@ -5,6 +5,8 @@ ZpdfDocument* zpdf_open_memory(const uint8_t* data, size_t len);
 ZpdfDocument* zpdf_open_memory_unsafe(const uint8_t* data, size_t len);
 void zpdf_close(ZpdfDocument* doc);
 int zpdf_page_count(ZpdfDocument* doc);
+// Cap the bytes one page's extraction may decompress; 0 = unlimited (default).
+void zpdf_set_page_decompress_limit(ZpdfDocument* doc, size_t limit);
 bool zpdf_is_encrypted(ZpdfDocument* doc);
 // Thread-local error for pointer-returning extraction functions:
 // 0=none/empty, 1=invalid handle, 2=page not found, 3=extraction failed, 4=out of memory.
