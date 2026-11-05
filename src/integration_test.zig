@@ -999,3 +999,122 @@ test "superscript positioning does not insert spurious newline" {
     // superscript is below the threshold max(7,12)*0.7=8.4 (Fix 8)
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\n") == null);
 }
+
+// =========================================================================
+// Memory bounds
+// =========================================================================
+
+test "a form drawn many times is decompressed once per page" {
+    const allocator = std.testing.allocator;
+    const uses = 200;
+    const padding = 64 * 1024;
+    const pdf_data = try testpdf.generateRepeatedFormPdf(allocator, uses, padding);
+    defer allocator.free(pdf_data);
+
+    var peak = testpdf.PeakAllocator{ .child = allocator };
+    const doc = try zpdf.Document.openFromMemory(peak.allocator(), pdf_data, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    const before = peak.live;
+    peak.peak = before;
+    try doc.extractText(0, compat.arrayListWriter(&output, allocator));
+
+    // The form is still drawn on every use.
+    try std.testing.expectEqual(@as(usize, uses), std.mem.count(u8, output.items, "FormText"));
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "PageText") != null);
+    // One decompressed copy, not one per use (that would be ~12.8 MB).
+    try std.testing.expect(peak.peak - before < 4 * padding);
+}
+
+test "page decompress limit skips oversized forms but keeps page text" {
+    const allocator = std.testing.allocator;
+    const pdf_data = try testpdf.generateRepeatedFormPdf(allocator, 3, 64 * 1024);
+    defer allocator.free(pdf_data);
+
+    const doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+    doc.page_decompress_limit = 16 * 1024;
+
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    try doc.extractText(0, compat.arrayListWriter(&output, allocator));
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "PageText") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "FormText") == null);
+}
+
+test "page over the decompress limit yields no text and no error" {
+    const allocator = std.testing.allocator;
+    const pdf_data = try testpdf.generateRepeatedFormPdf(allocator, 1, 16);
+    defer allocator.free(pdf_data);
+
+    const doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+    doc.page_decompress_limit = 8;
+
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    try doc.extractText(0, compat.arrayListWriter(&output, allocator));
+    try std.testing.expectEqual(@as(usize, 0), output.items.len);
+}
+
+test "page extraction invariants under random forms and limits" {
+    const allocator = std.testing.allocator;
+    const page_text = "BT\n/F1 12 Tf\n100 700 Td\n(PageText) Tj\nET\n";
+    const form_text = "BT\n/F1 12 Tf\n100 600 Td\n(FormText) Tj\nET\n";
+    var prng = std.Random.DefaultPrng.init(0xF0F0);
+    const r = prng.random();
+
+    for (0..300) |_| {
+        const uses = r.uintAtMost(usize, 40);
+        const padding = r.uintAtMost(usize, 8192);
+        const content_len = page_text.len + uses * "/Fm1 Do\n".len;
+        const form_len = form_text.len + padding;
+        const need = content_len + if (uses > 0) form_len else 0;
+        const limit: ?usize = switch (r.uintLessThan(u8, 4)) {
+            0 => null, // unlimited
+            1 => need, // exactly enough
+            2 => r.uintLessThan(usize, content_len + 1), // too small for the content
+            else => r.uintAtMost(usize, 2 * need + 1),
+        };
+
+        const pdf_data = try testpdf.generateRepeatedFormPdf(allocator, uses, padding);
+        defer allocator.free(pdf_data);
+        var peak = testpdf.PeakAllocator{ .child = allocator };
+        const doc = try zpdf.Document.openFromMemory(peak.allocator(), pdf_data, zpdf.ErrorConfig.permissive());
+        defer doc.close();
+        if (limit) |l| doc.page_decompress_limit = l;
+
+        var output: std.ArrayList(u8) = .empty;
+        defer output.deinit(allocator);
+        const before = peak.live;
+        peak.peak = before;
+        try doc.extractText(0, compat.arrayListWriter(&output, allocator));
+
+        const forms = std.mem.count(u8, output.items, "FormText");
+        const has_page = std.mem.indexOf(u8, output.items, "PageText") != null;
+        const l = limit orelse std.math.maxInt(usize);
+
+        // A form is cached per page: drawn on every use or not at all.
+        try std.testing.expect(forms == 0 or forms == uses);
+        if (l < content_len) {
+            try std.testing.expectEqual(@as(usize, 0), output.items.len);
+        } else {
+            try std.testing.expect(has_page);
+        }
+        if (l >= need) try std.testing.expectEqual(uses, forms);
+        // Scratch holds the page content and one copy of the form, plus fixed overhead.
+        try std.testing.expect(peak.peak - before <= need + 256 * 1024);
+
+        // With exactly enough budget the text matches the unlimited run.
+        if (limit != null and l == need) {
+            const doc2 = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.permissive());
+            defer doc2.close();
+            var unlimited: std.ArrayList(u8) = .empty;
+            defer unlimited.deinit(allocator);
+            try doc2.extractText(0, compat.arrayListWriter(&unlimited, allocator));
+            try std.testing.expectEqualStrings(unlimited.items, output.items);
+        }
+    }
+}

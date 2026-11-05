@@ -61,6 +61,15 @@ export fn zpdf_page_count(handle: ?*ZpdfDocument) c_int {
     return -1;
 }
 
+/// Cap the bytes one page's text extraction may decompress (page content
+/// plus Form XObjects). 0 means unlimited, the default.
+export fn zpdf_set_page_decompress_limit(handle: ?*ZpdfDocument, limit: usize) void {
+    if (handle) |h| {
+        const doc: *zpdf.Document = @ptrCast(@alignCast(h));
+        doc.page_decompress_limit = if (limit == 0) std.math.maxInt(usize) else limit;
+    }
+}
+
 export fn zpdf_is_encrypted(handle: ?*ZpdfDocument) bool {
     if (handle) |h| {
         const doc: *const zpdf.Document = @ptrCast(@alignCast(h));
